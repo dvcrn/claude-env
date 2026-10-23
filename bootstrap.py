@@ -477,13 +477,23 @@ def join_tailscale(authkey: str | None) -> None:
         TAILSCALE_MARKER.touch()
 
 
-def install_repo_tools() -> None:
+def repo_mise_project() -> str | None:
     project = os.environ.get("CLAUDE_PROJECT_DIR")
     if not project or not any((Path(project) / name).is_file() for name in REPO_MISE_CONFIGS):
-        return
-    prefix = "[mise] "
-    if run(["mise", "trust"], prefix, cwd=project):
-        run(["mise", "install", "--yes"], prefix, cwd=project)
+        return None
+    return project
+
+
+# The hook runs inside the repo, and every mise call there (including the op and tailscale
+# shims) fails until the repo's mise config is trusted, so this runs before anything else.
+def trust_repo() -> None:
+    if project := repo_mise_project():
+        run(["mise", "trust"], "[mise] ", cwd=project)
+
+
+def install_repo_tools() -> None:
+    if project := repo_mise_project():
+        run(["mise", "install", "--yes"], "[mise] ", cwd=project)
 
 
 # --- session-start --------------------------------------------------------------------------
@@ -500,6 +510,7 @@ def session_start(update: bool) -> None:
     """
     log("== session-start")
     os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ.get('PATH', '')}"
+    trust_repo()
 
     resuming = INIT_MARKER.exists()
     if resuming:
