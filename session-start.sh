@@ -1,5 +1,5 @@
 #!/bin/bash
-# VERSION=1
+# VERSION=2
 # claude-env SessionStart script, run by the hook loader on every session start and resume.
 # Each step fails on its own; without the broker the session starts without secrets.
 set -uo pipefail
@@ -78,12 +78,18 @@ load_1password() {
     return 1
   fi
   op_bin=$(mise which op) || { log "1password: op is not installed"; return 1; }  # the real binary; the mise shim would add its own variables
+  local -a clean_env=(env -i HOME="$HOME" OP_SERVICE_ACCOUNT_TOKEN="$op_token"
+    HTTPS_PROXY="${HTTPS_PROXY:-}" https_proxy="${https_proxy:-}"
+    NO_PROXY="${NO_PROXY:-}" no_proxy="${no_proxy:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}")
+  # The image's shell profiles (Nix) export their own variables into op's child, so any line
+  # the same environment exports without 1Password is dropped as profile noise.
+  local baseline
+  baseline=$("${clean_env[@]}" /bin/bash -lic 'export -p' 2> /dev/null < /dev/null || true)
   # --no-masking: op otherwise replaces secret values on stdout with a placeholder
-  if ! exports=$(env -i HOME="$HOME" OP_SERVICE_ACCOUNT_TOKEN="$op_token" \
-    HTTPS_PROXY="${HTTPS_PROXY:-}" https_proxy="${https_proxy:-}" \
-    NO_PROXY="${NO_PROXY:-}" no_proxy="${no_proxy:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" \
-    "$op_bin" run --no-masking --environment "$op_environment_id" -- /bin/bash -c 'export -p' \
+  if ! exports=$("${clean_env[@]}" \
+    "$op_bin" run --no-masking --environment "$op_environment_id" -- /bin/bash --noprofile --norc -c 'export -p' \
     | { grep -Ev '^declare -x (HOME|PATH|PWD|OLDPWD|SHLVL|_|OP_SERVICE_ACCOUNT_TOKEN|HTTPS_PROXY|https_proxy|NO_PROXY|no_proxy|SSL_CERT_FILE)(=|$)' || true; } \
+    | { grep -vxF -f <(printf '%s\n' "$baseline") || true; } \
     | sed 's/^declare -x /export /'); then
     log "1password: op run failed"
     return 1
