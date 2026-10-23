@@ -186,6 +186,9 @@ write_claude_settings() {
     "pr": "",
     "sessionUrl": false
   },
+  "permissions": {
+    "allow": [ "Bash(op:*)" ]
+  },
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "$HOOKS_DIR/session-start.sh", "timeout": 600 } ] }
