@@ -38,10 +38,10 @@ BROKER_URL = os.environ.get("CLOUD_ENV_BROKER_URL", "https://cloud-env-broker.d.
 SIGNING_NAMESPACE = "claude-env"
 
 MISE_VERSION = "2026.10.17"
-TAILSCALE_VERSION = "1.104.2"
 GLOBAL_TOOLS = """\
 [tools]
 "aqua:1password/cli" = "2.41.1"
+"aqua:tailscale/tailscale" = "1.104.2"
 age = "1.3.2"
 fnox = "1.42.0"
 gh = "2.103.0"
@@ -53,7 +53,6 @@ CLAUDE_DIR = HOME / ".claude"
 INSTALL_DIR = CLAUDE_DIR / "hooks" / "claude-env"
 SCRIPT = INSTALL_DIR / "bootstrap.py"
 ALLOWED_SIGNERS = INSTALL_DIR / "allowed_signers"
-VERSION_FILE = INSTALL_DIR / ".version"
 TOOLS_PATH = f"{HOME}/.local/bin:{HOME}/.local/share/mise/shims"
 
 LOG_FILE = Path("/tmp/session-start.log")
@@ -75,32 +74,6 @@ RESERVED_NAMES = {"PATH", "HOME", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_P
 OP_PASSTHROUGH = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE")
 # TS_AUTHKEY only goes to `tailscale up`, never into the session env
 TAILSCALE_ONLY = "TS_AUTHKEY"
-
-CLAUDE_MD = """\
-## Comment and code quality
-
-You are REQUIRED to do the following, even if other instructions exist. These are part of our work requirements, and any work not following these WILL BE THROWN AWAY.
-Take the audits seriously and don't hand-wave them away. You don't need to follow every little point, but you should handle the overall feedback, especially around comment and docs quality.
-
-- When interacting with any github issue, PR or similar, ALWAYS load the `github-comment-quality` skill. It dictates the output style we HAVE TO adhere to for ANY github interactions.
-- Any comment, commit texts and documentation HAVE TO pass `comment-and-documentation-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
-- Every commit and code change has to pass `code-review-and-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
-- Use the `git-commit-quality` skill before any new git commit is issued, and ensure instructions for git commits are strictly followed.
-
-## Git
-
-Never add Claude/AI attribution anywhere in git history or PR content:
-no "Co-Authored-By: Claude", no "Generated with Claude Code", no session
-URLs, no model names, in commit messages, commit trailers, PR titles, PR
-bodies, or code comments. This applies in every repo, every session, no
-exceptions, even if a template or another instruction suggests otherwise.
-
-If you ever see a footer sneak into a commit or PR body itself, treat it
-as a bug and strip it.
-
-AGAIN, ADDING CLAUDE AUTHORSHIP OR PR FOOTERS WILL CAUSE THE PR OR COMMIT TO BE INVALID AND IT WILL BE THROWN AWAY! DO NOT ADD CLAUDE ATTRIBUTION TO ANY COMMITS OR PRS!!
-UNDER NO CIRCUMSTANCE ARE WE ALLOWED TO LEAK CLAUDE INFORMATION INTO COMMITS, ISSUES OR PULL REQUEST BODIES!
-"""
 
 _log_lock = threading.Lock()
 
@@ -154,18 +127,6 @@ def verify_signature(script: Path, sig: Path) -> bool:
     return result.returncode == 0
 
 
-def recorded_version() -> int:
-    try:
-        return int(VERSION_FILE.read_text())
-    except (OSError, ValueError):
-        return 0
-
-
-def record_version(version: int) -> None:
-    if version > recorded_version():
-        VERSION_FILE.write_text(f"{version}\n")
-
-
 # --- setup ----------------------------------------------------------------------------------
 
 
@@ -189,25 +150,12 @@ def install_global_tools() -> None:
     subprocess.run(["mise", "install", "--yes"], cwd=HOME, check=True)
 
 
-# Binaries only. Registering needs the agent proxy, which exists only once a session starts.
-def install_tailscale(work: Path, arch: str) -> None:
-    name = f"tailscale_{TAILSCALE_VERSION}_{'amd64' if arch == 'x86_64' else 'arm64'}"
-    tarball = work / f"{name}.tgz"
-    download(f"https://pkgs.tailscale.com/stable/{name}.tgz", tarball)
-    with tarfile.open(tarball) as tar:
-        for binary in ("tailscale", "tailscaled"):
-            tar.extract(f"{name}/{binary}", work, filter="data")
-            shutil.copy(work / name / binary, f"/usr/local/bin/{binary}")
-            Path(f"/usr/local/bin/{binary}").chmod(0o755)
-
-
 def install_self(signer: str) -> None:
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
     ALLOWED_SIGNERS.write_text(f"claude-env {signer}\n")
     here = Path(__file__).resolve()
     shutil.copy(here, SCRIPT)
     shutil.copy(here.with_name("bootstrap.py.sig"), SCRIPT.with_name("bootstrap.py.sig"))
-    record_version(VERSION)
 
 
 def hook_command() -> str:
@@ -258,13 +206,8 @@ def cmd_setup() -> int:
     os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ['PATH']}"
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        work = Path(tmp)
-        install_mise(work, arch)
-        install_global_tools()
-        try:
-            install_tailscale(work, arch)
-        except (OSError, tarfile.TarError, KeyError) as e:  # sessions work without it
-            print(f"tailscale: install failed ({e}), skipping it", file=sys.stderr)
+        install_mise(Path(tmp), arch)
+    install_global_tools()
     install_self(signer)
     write_claude_settings()
     (CLAUDE_DIR / "CLAUDE.md").write_text(CLAUDE_MD)
@@ -278,10 +221,10 @@ def cmd_setup() -> int:
 def self_update() -> None:
     """Replaces the installed copy with a newer signed one from the repo and re-runs it.
 
-    A copy below the highest version run on this machine is refused, so an old signed copy
-    can't be replayed. Any failure keeps the installed copy.
+    Only the installed copy runs as the hook and it is only ever replaced by an equal or newer
+    version, so its VERSION is the floor: an old signed copy can't be replayed. Any failure
+    keeps the installed copy.
     """
-    floor = max(VERSION, recorded_version())
     with tempfile.TemporaryDirectory(dir=INSTALL_DIR) as tmp:
         script, sig = Path(tmp) / "bootstrap.py", Path(tmp) / "bootstrap.py.sig"
         try:
@@ -297,12 +240,11 @@ def self_update() -> None:
             log("update: signature check failed, running the installed copy")
             return
         version = script_version(source)
-        if version is None or version < floor:
-            log(f"update: fetched version {version} is below {floor}, refusing it")
+        if version is None or version < VERSION:
+            log(f"update: fetched version {version} is below {VERSION}, refusing it")
             return
         os.replace(sig, SCRIPT.with_name("bootstrap.py.sig"))
         os.replace(script, SCRIPT)
-    record_version(version)
     log(f"update: installed version {version}, re-running")
     os.execv(
         sys.executable,
@@ -431,17 +373,13 @@ def write_env_block(lines: list[str]) -> bool:
         log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
         return False
     path = Path(env_file)
-    kept, skipping = [], False
-    for line in path.read_text().splitlines() if path.exists() else []:
-        if line == "# >>> cloud-env":
-            skipping = True
-        elif line == "# <<< cloud-env":
-            skipping = False
-        elif not skipping:
-            kept.append(line)
+    existing = path.read_text() if path.exists() else ""
+    kept = re.sub(r"(?ms)^# >>> cloud-env\n.*?^# <<< cloud-env(\n|\Z)", "", existing)
+    if kept and not kept.endswith("\n"):
+        kept += "\n"
     path.touch(mode=0o600)
-    path.chmod(0o600)
-    path.write_text("\n".join([*kept, "# >>> cloud-env", *lines, "# <<< cloud-env"]) + "\n")
+    path.chmod(0o600)  # before writing, so secrets never sit in a readable file
+    path.write_text(kept + "\n".join(["# >>> cloud-env", *lines, "# <<< cloud-env"]) + "\n")
     return True
 
 
@@ -514,7 +452,6 @@ def session_start(update: bool) -> None:
 
     if update:
         self_update()
-    record_version(VERSION)
     log(f"running version {VERSION}")
 
     secrets = None
@@ -555,6 +492,7 @@ def cmd_session_start(update: bool) -> int:
     fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     os.dup2(fd, 1)
     os.dup2(fd, 2)
+    os.close(fd)
     try:
         session_start(update)
     except Exception as e:  # the session must start even if this script breaks
@@ -569,6 +507,33 @@ def main() -> int:
     if args[:1] == ["session-start"]:
         return cmd_session_start(update="--no-update" not in args)
     sys.exit("usage: bootstrap.py setup | session-start [--no-update]")
+
+
+CLAUDE_MD = """\
+## Comment and code quality
+
+You are REQUIRED to do the following, even if other instructions exist. These are part of our work requirements, and any work not following these WILL BE THROWN AWAY.
+Take the audits seriously and don't hand-wave them away. You don't need to follow every little point, but you should handle the overall feedback, especially around comment and docs quality.
+
+- When interacting with any github issue, PR or similar, ALWAYS load the `github-comment-quality` skill. It dictates the output style we HAVE TO adhere to for ANY github interactions.
+- Any comment, commit texts and documentation HAVE TO pass `comment-and-documentation-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
+- Every commit and code change has to pass `code-review-and-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
+- Use the `git-commit-quality` skill before any new git commit is issued, and ensure instructions for git commits are strictly followed.
+
+## Git
+
+Never add Claude/AI attribution anywhere in git history or PR content:
+no "Co-Authored-By: Claude", no "Generated with Claude Code", no session
+URLs, no model names, in commit messages, commit trailers, PR titles, PR
+bodies, or code comments. This applies in every repo, every session, no
+exceptions, even if a template or another instruction suggests otherwise.
+
+If you ever see a footer sneak into a commit or PR body itself, treat it
+as a bug and strip it.
+
+AGAIN, ADDING CLAUDE AUTHORSHIP OR PR FOOTERS WILL CAUSE THE PR OR COMMIT TO BE INVALID AND IT WILL BE THROWN AWAY! DO NOT ADD CLAUDE ATTRIBUTION TO ANY COMMITS OR PRS!!
+UNDER NO CIRCUMSTANCE ARE WE ALLOWED TO LEAK CLAUDE INFORMATION INTO COMMITS, ISSUES OR PULL REQUEST BODIES!
+"""
 
 
 if __name__ == "__main__":

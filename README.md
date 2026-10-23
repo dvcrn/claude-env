@@ -1,36 +1,53 @@
 # claude-env
 
-Signed bootstrap scripts for Claude Code cloud environments. Every environment runs the same
-setup stub, which verifies and runs `bootstrap.sh` from this repo, so no environment's setup
-script holds secrets or needs editing when the scripts change.
+A signed bootstrap for Claude Code cloud environments. Every environment runs the same setup
+stub, which verifies and runs `bootstrap.py` from this repo, so no environment's setup script
+holds secrets or needs editing when the bootstrap changes.
 
-| File | Runs | Does |
-|---|---|---|
-| `stub.sh` | as the environment's setup script | Verifies `bootstrap.sh` against `SIGNER` and runs it |
-| `bootstrap.sh` | at setup | Installs mise, the tools in `tools/`, Tailscale and the SessionStart hook loader. No secrets |
-| hook loader | on every session start | Runs the latest signed `session-start.sh`, or the last verified copy |
-| `session-start.sh` | from the loader | Loads secrets from `https://cloud-env-broker.d.pn` and 1Password, and configures git, GitHub, Tailscale and repo tools. Logs to `/tmp/session-start.log` |
+| File                         | Runs                              | Does                                                                                                                                                                                             |
+| ---------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `stub.sh`                    | as the environment's setup script | Verifies `bootstrap.py` against `SIGNER` and runs `bootstrap.py setup`                                                                                                                           |
+| `bootstrap.py setup`         | once, at setup                    | Installs mise and the tools in `GLOBAL_TOOLS` (op, Tailscale, gh, ...), installs itself as the SessionStart hook, and writes `~/.claude/settings.json` and `~/.claude/CLAUDE.md`. No secrets     |
+| `bootstrap.py session-start` | on every session start and resume | Updates itself to the newest signed copy, loads secrets from `https://cloud-env-broker.d.pn` and 1Password into the session env, and configures git, GitHub, Tailscale and the repo's mise tools |
 
-If the broker can't be reached, the session starts without secrets and the log says so.
+`bootstrap.py` is a single Python script using only the standard library.
 
-## Signing
+## Setting up an environment
 
-Both scripts are signed with an SSH Ed25519 key and carry `# VERSION=<n>` on line 2. After changing either script:
-
-1. Bump its `# VERSION=` if old signed copies should no longer run.
-2. `mise run sign` signs both with `CLAUDE_ENV_SIGNING_KEY` from fnox, writing the `.sig` files.
-3. `mise run check` lints the scripts, checks the `tools/` pins, and verifies the signatures
-   against `signing_key.pub`.
-4. Commit the scripts and their `.sig` files together.
-
-After changing `tools/mise.toml`, regenerate the lockfile with
-`mise lock --platform linux-x64,linux-arm64` in `tools/`, then update `TOOLS_TOML_SHA256` and
-`TOOLS_LOCK_SHA256` in `bootstrap.sh` to the values `mise run check` prints.
-
-## Using the stub
-
-1. Paste `stub.sh` as the environment's setup script. Its `SIGNER` is the key in `signing_key.pub`.
+1. In the Claude Code environment settings, paste [`stub.sh`](stub.sh) as the setup script. Its
+   `SIGNER` is the key in `signing_key.pub`.
 2. Give the environment a network secret for `cloud-env-broker.d.pn` carrying its broker
    credentials.
 
-Raise `MIN_VERSION` in the stub to stop older signed copies of `bootstrap.sh` from running.
+Each session then gets, from the broker and the 1Password Environment it points to:
+
+- the 1Password variables and broker variables in the session env (`TS_AUTHKEY` excepted, it
+  only goes to `tailscale up`)
+- git author identity from `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`
+- direct GitHub access with `GITHUB_TOKEN`, bypassing the agent proxy so any repo is reachable
+- a Tailscale node named `claude-<session id>` if `TS_AUTHKEY` is set
+- the repo's tools if it has a `mise.toml`
+
+If the broker can't be reached, the session starts without secrets.
+
+## Debugging a session
+
+- `/tmp/session-start.log` has the hook's output, including mise and Tailscale.
+- `/tmp/tailscaled.log` has the Tailscale daemon's output.
+- The installed hook lives in `~/.claude/hooks/claude-env/`. Run it by hand with
+  `python3 -I ~/.claude/hooks/claude-env/bootstrap.py session-start --no-update`.
+- A resumed session skips everything unless Tailscale went down. Delete
+  `/dev/shm/.cloud-env-initialized` to force a full run.
+
+## Changing the bootstrap
+
+1. Edit `bootstrap.py`. Tool versions live in `GLOBAL_TOOLS`, mise's in `MISE_VERSION`.
+2. Raise `VERSION` if older signed copies should no longer run. Installed copies only update
+   to an equal or higher `VERSION`, so a lower one is never picked up.
+3. `mise run sign` signs `bootstrap.py` with `CLAUDE_ENV_SIGNING_KEY` from fnox and runs
+   `mise run check`, which lints and verifies `bootstrap.py.sig` against `signing_key.pub`.
+4. Commit `bootstrap.py` and `bootstrap.py.sig` together.
+
+Running sessions pick up the new copy at their next session start. New environments get it at
+setup. Raise `MIN_VERSION` in the stub to stop older signed copies from being installed at
+setup.
