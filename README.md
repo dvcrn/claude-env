@@ -7,16 +7,15 @@ script holds secrets or needs editing when the scripts change.
 | File | Runs | Does |
 |---|---|---|
 | `stub.sh` | as the environment's setup script | Verifies `bootstrap.sh` against `SIGNER` and runs it |
-| `bootstrap.sh` | at setup (snapshotted for up to 7 days) | Installs mise, the tools pinned in `tools/`, Tailscale and the SessionStart hook loader. No secrets |
-| hook loader | on every session start | Fetches and verifies the current `session-start.sh`, falling back to the copy verified at setup. Refuses versions below the highest it has run |
-| `session-start.sh` | from the loader | Fetches credentials from `https://cloud-env-broker.d.pn`, loads the 1Password Environment into the session, sets the git identity, routes GitHub past the agent proxy, joins Tailscale and runs `mise install` for the repo. Logs to `/tmp/session-start.log` |
+| `bootstrap.sh` | at setup | Installs mise, the tools in `tools/`, Tailscale and the SessionStart hook loader. No secrets |
+| hook loader | on every session start | Runs the latest signed `session-start.sh`, or the copy verified at setup |
+| `session-start.sh` | from the loader | Loads secrets from `https://cloud-env-broker.d.pn` and 1Password, and configures git, GitHub, Tailscale and repo tools. Logs to `/tmp/session-start.log` |
 
 If the broker can't be reached, the session starts without secrets and the log says so.
 
 ## Signing
 
-Both scripts are signed with an SSH Ed25519 key, and each carries `# VERSION=<n>` on line 2 so
-the version is covered by the signature. After changing either script:
+Both scripts are signed with an SSH Ed25519 key and carry `# VERSION=<n>` on line 2. After changing either script:
 
 1. Bump its `# VERSION=` if old signed copies should no longer run.
 2. `mise run sign` signs both with `~/.ssh/id_ed25519`, writing the `.sig` files.

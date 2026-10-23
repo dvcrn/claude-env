@@ -1,9 +1,7 @@
 #!/bin/bash
 # VERSION=1
 # claude-env SessionStart script, run by the hook loader on every session start and resume.
-# Fetches credentials from the broker, loads the 1Password Environment into the session, then
-# sets the git identity, routes GitHub past the agent proxy, joins Tailscale and installs repo
-# tools. Each step fails on its own; without the broker the session starts without secrets.
+# Each step fails on its own; without the broker the session starts without secrets.
 set -uo pipefail
 
 BROKER_URL=${CLOUD_ENV_BROKER_URL:-https://cloud-env-broker.d.pn}
@@ -138,7 +136,7 @@ use_github_directly() {
     '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'
 }
 
-# Replaces this script's marked block in $CLAUDE_ENV_FILE, keeping everything else in the file
+# Replaces this script's marked block in $CLAUDE_ENV_FILE
 write_env_block() {
   if [ -z "${CLAUDE_ENV_FILE:-}" ]; then
     log "env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables"

@@ -2,7 +2,7 @@
 shellcheck = "0.11.0"
 
 [tasks.lint]
-description = "shellcheck and bash -n every script, including the loader embedded in bootstrap.sh"
+description = "Run bash -n and shellcheck on every script, including the loader in bootstrap.sh"
 shell = "bash -c"
 run = '''
 set -euo pipefail

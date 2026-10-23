@@ -1,8 +1,8 @@
 #!/bin/bash
 # VERSION=1
 # Setup-time bootstrap for Claude Code cloud environments, run by stub.sh once its signature
-# checks out. Installs tools and the SessionStart hook loader. Holds no secrets and makes no
-# broker calls; everything secret is loaded by session-start.sh when a session starts.
+# checks out. Installs tools and the SessionStart hook loader. Holds no secrets; session-start.sh
+# loads them when a session starts.
 set -euo pipefail
 
 # --- Configuration -------------------------------------------------------------------------
@@ -105,7 +105,6 @@ write_hook_loader() {
 #!/bin/bash
 # SessionStart hook loader installed by claude-env's bootstrap.sh. Runs the newest signed
 # session-start.sh, or the copy verified at setup time if that can't be fetched or verified.
-# Refuses any version below the highest one run on this machine. Logs to /tmp/session-start.log.
 set -uo pipefail
 exec >> /tmp/session-start.log 2>&1
 
