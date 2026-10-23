@@ -3,6 +3,10 @@
 # claude-env and runs it. Identical in every environment; SIGNER is the key in signing_key.pub.
 set -euo pipefail
 
+# No-scope GitHub token: lifts setup's anonymous api.github.com rate limit (60/h per shared IP)
+MISE_GITHUB_TOKEN=''
+if [ -n "$MISE_GITHUB_TOKEN" ]; then export MISE_GITHUB_TOKEN; fi
+
 BASE=https://raw.githubusercontent.com/dvcrn/claude-env/main
 SIGNER='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILI+2eft+G5merFwPUtQobbra0i34484V5mFe7aqb4KS claude-env-signing'
 MIN_VERSION=1
