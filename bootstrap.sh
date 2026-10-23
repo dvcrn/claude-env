@@ -12,9 +12,10 @@ BASE=https://raw.githubusercontent.com/dvcrn/claude-env/main
 MISE_VERSION=2026.10.17
 TAILSCALE_VERSION=1.104.2
 # OP_SHA256 (per architecture, below) is the op binary from 1Password's release zip for the
-# version in tools/mise.toml. 1Password publishes no checksums for mise to verify.
+# version in tools/mise.lock. 1Password publishes no checksums for mise to verify.
 
-# tools/ is not signed, so this signed script pins its contents (`mise run check` compares them)
+# tools/ is not signed, so this signed script pins its contents (`mise run sign` writes these
+# pins and OP_SHA256)
 TOOLS_TOML_SHA256=9e8e3f7961e7dadd61fdda54e0971609fd1da23c2b2985ce9302b74a513e00b0
 TOOLS_LOCK_SHA256=5f917b931736996bc22b110d5e60d217381d253e779c566c2fbb7fc18669e280
 
