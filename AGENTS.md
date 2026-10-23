@@ -1,0 +1,1 @@
+- After each change to the files, a signature has to be generated using `mise sign`. Confirm that that the .sig files match the public key
