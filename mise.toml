@@ -1,83 +1,38 @@
 [tools]
+ruff = "0.17.1"
 shellcheck = "0.11.0"
 
 [tasks.lint]
-description = "Run bash -n and shellcheck on every script, including the loader in bootstrap.sh"
-shell = "bash -c"
-run = '''
-set -euo pipefail
-loader=$(mktemp)
-trap 'rm -f "$loader"' EXIT
-sed -n "/<< 'LOADER'$/,/^LOADER$/{//!p;}" bootstrap.sh > "$loader"
-for script in *.sh "$loader"; do
-  bash -n "$script"
-  shellcheck -s bash "$script"
-done
-'''
+description = "Run ruff on bootstrap.py and shellcheck on stub.sh"
+run = [
+  "ruff check bootstrap.py",
+  "ruff format --check bootstrap.py",
+  "bash -n stub.sh",
+  "shellcheck -s bash stub.sh",
+]
 
 [tasks.sign]
-description = "Pin tools/ and op checksums in bootstrap.sh, sign both scripts with CLAUDE_ENV_SIGNING_KEY from fnox, then run check"
+description = "Sign bootstrap.py with CLAUDE_ENV_SIGNING_KEY from fnox, then run check"
 shell = "bash -c"
 run = '''
 set -euo pipefail
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-
-# Prints the sha256 of the op binary inside the 1Password zip that tools/mise.lock lists for platform $1
-op_sum() {
-  local header="[tools.\"aqua:1password/cli\".\"platforms.$1\"]" url
-  url=$(awk -v h="$header" '$0 == h { f = 1; next } f && /^url = / { gsub(/^url = "|"$/, ""); print; exit }' tools/mise.lock)
-  [ -n "$url" ] || { echo "sign: no op url for $1 in tools/mise.lock" >&2; return 1; }
-  curl -fsSL --retry 3 "$url" -o "$work/op-$1.zip" || return 1
-  unzip -p "$work/op-$1.zip" op | sha256sum | cut -d' ' -f1
-}
-
-toml_sum=$(sha256sum tools/mise.toml | cut -d' ' -f1)
-lock_sum=$(sha256sum tools/mise.lock | cut -d' ' -f1)
-# The op version lives in the lockfile, so op only needs rehashing when the lockfile changed
-op_x64= op_arm64=
-if ! grep -qx "TOOLS_LOCK_SHA256=$lock_sum" bootstrap.sh; then
-  op_x64=$(op_sum linux-x64)
-  op_arm64=$(op_sum linux-arm64)
-fi
-
-awk -v toml="$toml_sum" -v lock="$lock_sum" -v x64="$op_x64" -v arm64="$op_arm64" '
-  /MISE_ARCH=x64 / { arch = "x64" }
-  /MISE_ARCH=arm64 / { arch = "arm64" }
-  /^TOOLS_TOML_SHA256=/ { $0 = "TOOLS_TOML_SHA256=" toml }
-  /^TOOLS_LOCK_SHA256=/ { $0 = "TOOLS_LOCK_SHA256=" lock }
-  /^ *OP_SHA256=/ && arch == "x64" && x64 != "" { sub(/=.*/, "=" x64) }
-  /^ *OP_SHA256=/ && arch == "arm64" && arm64 != "" { sub(/=.*/, "=" arm64) }
-  { print }
-' bootstrap.sh > "$work/bootstrap.sh"
-[ "$(grep -c '^ *OP_SHA256=[0-9a-f]\{64\}$' "$work/bootstrap.sh")" = 2 ] ||
-  { echo "sign: expected two OP_SHA256 pins in bootstrap.sh" >&2; exit 1; }
-cat "$work/bootstrap.sh" > bootstrap.sh
-
-fnox get CLAUDE_ENV_SIGNING_KEY > "$work/key"
-chmod 600 "$work/key"
-rm -f bootstrap.sh.sig session-start.sh.sig
-ssh-keygen -Y sign -f "$work/key" -n claude-env-bootstrap bootstrap.sh
-ssh-keygen -Y sign -f "$work/key" -n claude-env-session-start session-start.sh
+key=$(mktemp)
+trap 'rm -f "$key"' EXIT
+fnox get CLAUDE_ENV_SIGNING_KEY > "$key"
+rm -f bootstrap.py.sig
+ssh-keygen -Y sign -f "$key" -n claude-env bootstrap.py
 mise run check
 '''
 
 [tasks.check]
-description = "Lint, then confirm the tools/ pins and both signatures match the scripts"
+description = "Lint, then confirm bootstrap.py.sig matches bootstrap.py and signing_key.pub"
 depends = ["lint"]
 shell = "bash -c"
 run = '''
 set -euo pipefail
-for pin in TOOLS_TOML_SHA256:tools/mise.toml TOOLS_LOCK_SHA256:tools/mise.lock; do
-  sum=$(sha256sum "${pin#*:}" | cut -d' ' -f1)
-  grep -qx "${pin%%:*}=$sum" bootstrap.sh ||
-    { echo "bootstrap.sh: ${pin%%:*} is stale, run mise run sign" >&2; exit 1; }
-done
 signers=$(mktemp)
 trap 'rm -f "$signers"' EXIT
 echo "claude-env $(cat signing_key.pub)" > "$signers"
-for pair in bootstrap.sh:claude-env-bootstrap session-start.sh:claude-env-session-start; do
-  ssh-keygen -Y verify -f "$signers" -I claude-env -n "${pair#*:}" -s "${pair%%:*}.sig" < "${pair%%:*}" ||
-    { echo "${pair%%:*}: missing or stale signature, run mise run sign" >&2; exit 1; }
-done
+ssh-keygen -Y verify -f "$signers" -I claude-env -n claude-env -s bootstrap.py.sig < bootstrap.py ||
+  { echo "bootstrap.py: missing or stale signature, run mise run sign" >&2; exit 1; }
 '''

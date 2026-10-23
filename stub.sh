@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup script for a Claude Code cloud environment: verifies the signed bootstrap.sh from
+# Setup script for a Claude Code cloud environment: verifies the signed bootstrap.py from
 # claude-env and runs it. Identical in every environment; SIGNER is the key in signing_key.pub.
 set -euo pipefail
 
@@ -9,13 +9,15 @@ MIN_VERSION=1
 
 # The base image ships without openssh-client
 if ! command -v ssh-keygen > /dev/null; then
-  apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-client
+  apt-get update -qq &&
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-client
 fi
 
 dir=$(mktemp -d)
-curl -fsSL --retry 3 "$BASE/bootstrap.sh" -o "$dir/bootstrap.sh"
-curl -fsSL --retry 3 "$BASE/bootstrap.sh.sig" -o "$dir/bootstrap.sh.sig"
+trap 'rm -rf "$dir"' EXIT
+curl -fsSL --retry 3 "$BASE/bootstrap.py" -o "$dir/bootstrap.py"
+curl -fsSL --retry 3 "$BASE/bootstrap.py.sig" -o "$dir/bootstrap.py.sig"
 echo "claude-env $SIGNER" > "$dir/allowed_signers"
-ssh-keygen -Y verify -f "$dir/allowed_signers" -I claude-env -n claude-env-bootstrap \
-  -s "$dir/bootstrap.sh.sig" < "$dir/bootstrap.sh"
-MIN_VERSION=$MIN_VERSION SIGNER=$SIGNER bash "$dir/bootstrap.sh"
+ssh-keygen -Y verify -f "$dir/allowed_signers" -I claude-env -n claude-env \
+  -s "$dir/bootstrap.py.sig" < "$dir/bootstrap.py"
+MIN_VERSION=$MIN_VERSION SIGNER=$SIGNER python3 -I "$dir/bootstrap.py" setup
