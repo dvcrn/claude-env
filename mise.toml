@@ -1,0 +1,44 @@
+[tools]
+shellcheck = "0.11.0"
+
+[tasks.lint]
+description = "Run bash -n and shellcheck on every script, including the loader in bootstrap.sh"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+loader=$(mktemp)
+trap 'rm -f "$loader"' EXIT
+sed -n "/<< 'LOADER'$/,/^LOADER$/{//!p}" bootstrap.sh > "$loader"
+for script in *.sh "$loader"; do
+  bash -n "$script"
+  shellcheck -s bash "$script"
+done
+'''
+
+[tasks.sign]
+description = "Sign both scripts with ~/.ssh/id_ed25519"
+run = [
+  "rm -f bootstrap.sh.sig session-start.sh.sig",
+  "ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n claude-env-bootstrap bootstrap.sh",
+  "ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n claude-env-session-start session-start.sh",
+]
+
+[tasks.check]
+description = "Lint, then confirm the tools/ pins and both signatures match the scripts"
+depends = ["lint"]
+shell = "bash -c"
+run = '''
+set -euo pipefail
+for pin in TOOLS_TOML_SHA256:tools/mise.toml TOOLS_LOCK_SHA256:tools/mise.lock; do
+  sum=$(sha256sum "${pin#*:}" | cut -d' ' -f1)
+  grep -qx "${pin%%:*}=$sum" bootstrap.sh ||
+    { echo "bootstrap.sh: set ${pin%%:*}=$sum" >&2; exit 1; }
+done
+signers=$(mktemp)
+trap 'rm -f "$signers"' EXIT
+echo "claude-env $(cat "${SIGNER_PUBKEY:-$HOME/.ssh/id_ed25519.pub}")" > "$signers"
+for pair in bootstrap.sh:claude-env-bootstrap session-start.sh:claude-env-session-start; do
+  ssh-keygen -Y verify -f "$signers" -I claude-env -n "${pair#*:}" -s "${pair%%:*}.sig" < "${pair%%:*}" ||
+    { echo "${pair%%:*}: missing or stale signature, run mise run sign" >&2; exit 1; }
+done
+'''
