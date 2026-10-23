@@ -287,7 +287,11 @@ def ingress_sig_sample() -> str | None:
 
 
 def fetch_broker_env() -> dict[str, str] | None:
-    headers = {"X-Session-Id": os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "")}
+    headers = {
+        # Cloudflare's Browser Integrity Check rejects urllib's default User-Agent (error 1010)
+        "User-Agent": f"claude-env-bootstrap/{VERSION}",
+        "X-Session-Id": os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", ""),
+    }
     if sample := ingress_sig_sample():
         headers["X-Ingress-Sig-Sample"] = sample
     request = urllib.request.Request(f"{BROKER_URL}/v1/session-env", headers=headers)
