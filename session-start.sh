@@ -28,8 +28,9 @@ import json, re, shlex, sys
 
 env = json.load(sys.stdin)["env"]
 private = {"OP_SERVICE_ACCOUNT_TOKEN": "op_token", "OP_ENVIRONMENT_ID": "op_environment_id"}
+reserved = {"PATH", "HOME", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH"}
 for name, value in env.items():
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or not isinstance(value, str):
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) or name in reserved or not isinstance(value, str):
         sys.exit(f"invalid entry {name!r}")
     if name in private:
         print(f"{private[name]}={shlex.quote(value)}")
@@ -82,28 +83,28 @@ load_1password() {
     HTTPS_PROXY="${HTTPS_PROXY:-}" https_proxy="${https_proxy:-}" \
     NO_PROXY="${NO_PROXY:-}" no_proxy="${no_proxy:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" \
     "$op_bin" run --no-masking --environment "$op_environment_id" -- /bin/bash -c 'export -p' \
-    | grep -Ev '^declare -x (HOME|PATH|PWD|OLDPWD|SHLVL|_|OP_SERVICE_ACCOUNT_TOKEN|HTTPS_PROXY|https_proxy|NO_PROXY|no_proxy|SSL_CERT_FILE)(=|$)' \
+    | { grep -Ev '^declare -x (HOME|PATH|PWD|OLDPWD|SHLVL|_|OP_SERVICE_ACCOUNT_TOKEN|HTTPS_PROXY|https_proxy|NO_PROXY|no_proxy|SSL_CERT_FILE)(=|$)' || true; } \
     | sed 's/^declare -x /export /'); then
     log "1password: op run failed"
     return 1
   fi
   eval "$exports"
-  # One block line per variable, so single variables can be dropped later
   local names name
   names=$(sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' <<< "$exports")
   for name in $names; do
-    block+=("export $name=$(printf '%q' "${!name-}")")
+    [ "$name" = TS_AUTHKEY ] || block+=("export $name=$(printf '%q' "${!name-}")")
   done
   log "1password: loaded ${names//$'\n'/ }"
 }
 
-# Broker values follow the 1Password ones in the block, so a broker-minted token wins
+# Broker values follow the 1Password ones in the block, so a broker-minted token wins.
+# TS_AUTHKEY stays out of the block (here and in load_1password): only tailscale up needs it.
 add_broker_exports() {
   [ "${#broker_exports[@]}" -gt 0 ] || return 0
   local line
   for line in "${broker_exports[@]}"; do
     eval "$line"
-    block+=("$line")
+    [[ $line == "export TS_AUTHKEY="* ]] || block+=("$line")
   done
 }
 
@@ -125,7 +126,7 @@ use_github_directly() {
     log "github: no GITHUB_TOKEN, leaving GitHub traffic on the agent proxy"
     return 0
   fi
-  local exports="export NO_PROXY=\"\$NO_PROXY,$GITHUB_HOSTS\" no_proxy=\"\$no_proxy,$GITHUB_HOSTS\" GH_TOKEN=\"\$GITHUB_TOKEN\""
+  local exports="export NO_PROXY=\"\${NO_PROXY:+\$NO_PROXY,}$GITHUB_HOSTS\" no_proxy=\"\${no_proxy:+\$no_proxy,}$GITHUB_HOSTS\" GH_TOKEN=\"\$GITHUB_TOKEN\""
   eval "$exports"  # for this script's own mise install
   block+=("$exports")
   # The empty entry drops helpers configured earlier; ours reads the token at run time, so it never hits disk
@@ -166,24 +167,17 @@ join_tailscale() {
     return 0
   fi
   if ! pgrep -x tailscaled > /dev/null; then
-    setsid nohup tailscaled --state=mem: --no-logs-no-support >> /tmp/tailscaled.log 2>&1 < /dev/null &
+    setsid nohup env -u TS_AUTHKEY tailscaled --state=mem: --no-logs-no-support >> /tmp/tailscaled.log 2>&1 < /dev/null &
     for _ in $(seq 1 20); do
       [ -S /var/run/tailscale/tailscaled.sock ] && break
       sleep 0.5
     done
   fi
   local name
-  name="claude-$(echo "${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}" | tr '[:upper:]_' '[:lower:]-')"
+  name="claude-$(echo "${CLAUDE_CODE_REMOTE_SESSION_ID:-unknown}" | sed 's/^cse_//' | tr '[:upper:]_' '[:lower:]-')"
   tailscale up --auth-key="$TS_AUTHKEY" --hostname="$name" --timeout=60s || return 1
   tailscale status --peers=false
   touch "$TAILSCALE_MARKER"
-
-  local kept=() line
-  for line in "${block[@]}"; do
-    [[ $line == "export TS_AUTHKEY="* ]] || kept+=("$line")
-  done
-  block=("${kept[@]}")
-  write_env_block && log "removed TS_AUTHKEY from the env block"
 }
 
 install_repo_tools() {
@@ -204,13 +198,11 @@ if [ -e "$INIT_MARKER" ]; then
   log "resume: tailscaled is gone, running the full start to rejoin"
 fi
 
-if fetch_credentials && load_1password; then
-  touch "$INIT_MARKER"
-fi
+fetch_credentials && load_1password && loaded=1
 add_broker_exports
 set_git_identity
 use_github_directly
-write_env_block
+write_env_block && [ -n "${loaded:-}" ] && touch "$INIT_MARKER"
 
 { join_tailscale || log "failed"; } 2>&1 | sed -u 's/^/[tailscale] /' &
 { install_repo_tools || log "repo install failed"; } 2>&1 | sed -u 's/^/[mise] /' &

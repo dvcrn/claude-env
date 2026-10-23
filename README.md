@@ -8,7 +8,7 @@ script holds secrets or needs editing when the scripts change.
 |---|---|---|
 | `stub.sh` | as the environment's setup script | Verifies `bootstrap.sh` against `SIGNER` and runs it |
 | `bootstrap.sh` | at setup | Installs mise, the tools in `tools/`, Tailscale and the SessionStart hook loader. No secrets |
-| hook loader | on every session start | Runs the latest signed `session-start.sh`, or the copy verified at setup |
+| hook loader | on every session start | Runs the latest signed `session-start.sh`, or the last verified copy |
 | `session-start.sh` | from the loader | Loads secrets from `https://cloud-env-broker.d.pn` and 1Password, and configures git, GitHub, Tailscale and repo tools. Logs to `/tmp/session-start.log` |
 
 If the broker can't be reached, the session starts without secrets and the log says so.

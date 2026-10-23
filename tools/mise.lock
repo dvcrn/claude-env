@@ -2,17 +2,6 @@
 
 lockfile_version = 3
 
-[[tools.1password]]
-version = "2.41.1"
-backend = "vfox:jdx/vfox-1password"
-specifiers = ["2.41.1"]
-
-[tools.1password."platforms.linux-arm64"]
-url = "https://cache.agilebits.com/dist/1P/op2/pkg/v2.41.1/op_linux_arm64_v2.41.1.zip"
-
-[tools.1password."platforms.linux-x64"]
-url = "https://cache.agilebits.com/dist/1P/op2/pkg/v2.41.1/op_linux_amd64_v2.41.1.zip"
-
 [[tools.age]]
 version = "1.3.2"
 backend = "aqua:FiloSottile/age"
@@ -29,6 +18,17 @@ checksum = "sha256:cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26a
 url = "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz"
 url_api = "https://api.github.com/repos/FiloSottile/age/releases/assets/535541903"
 provenance = "github-attestations"
+
+[[tools."aqua:1password/cli"]]
+version = "2.41.1"
+backend = "aqua:1password/cli"
+specifiers = ["2.41.1"]
+
+[tools."aqua:1password/cli"."platforms.linux-arm64"]
+url = "https://cache.agilebits.com/dist/1P/op2/pkg/v2.41.1/op_linux_arm64_v2.41.1.zip"
+
+[tools."aqua:1password/cli"."platforms.linux-x64"]
+url = "https://cache.agilebits.com/dist/1P/op2/pkg/v2.41.1/op_linux_amd64_v2.41.1.zip"
 
 [[tools.fnox]]
 version = "1.42.0"
