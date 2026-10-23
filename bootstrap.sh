@@ -187,7 +187,7 @@ write_claude_settings() {
     "sessionUrl": false
   },
   "permissions": {
-    "allow": [ "Bash(op:*)" ]
+    "allow": [ "Bash(op:*)", "Bash(jq:*)" ]
   },
   "hooks": {
     "SessionStart": [
