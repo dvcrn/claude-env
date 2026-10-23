@@ -16,12 +16,17 @@ done
 '''
 
 [tasks.sign]
-description = "Sign both scripts with ~/.ssh/id_ed25519"
-run = [
-  "rm -f bootstrap.sh.sig session-start.sh.sig",
-  "ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n claude-env-bootstrap bootstrap.sh",
-  "ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n claude-env-session-start session-start.sh",
-]
+description = "Sign both scripts with CLAUDE_ENV_SIGNING_KEY from fnox"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+key=$(mktemp)
+trap 'rm -f "$key"' EXIT
+fnox get CLAUDE_ENV_SIGNING_KEY > "$key"
+rm -f bootstrap.sh.sig session-start.sh.sig
+ssh-keygen -Y sign -f "$key" -n claude-env-bootstrap bootstrap.sh
+ssh-keygen -Y sign -f "$key" -n claude-env-session-start session-start.sh
+'''
 
 [tasks.check]
 description = "Lint, then confirm the tools/ pins and both signatures match the scripts"

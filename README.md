@@ -18,7 +18,7 @@ If the broker can't be reached, the session starts without secrets and the log s
 Both scripts are signed with an SSH Ed25519 key and carry `# VERSION=<n>` on line 2. After changing either script:
 
 1. Bump its `# VERSION=` if old signed copies should no longer run.
-2. `mise run sign` signs both with `~/.ssh/id_ed25519`, writing the `.sig` files.
+2. `mise run sign` signs both with `CLAUDE_ENV_SIGNING_KEY` from fnox, writing the `.sig` files.
 3. `mise run check` lints the scripts and confirms the pins and signatures match. Set
    `SIGNER_PUBKEY` if the public key isn't `~/.ssh/id_ed25519.pub`.
 4. Commit the scripts and their `.sig` files together.
