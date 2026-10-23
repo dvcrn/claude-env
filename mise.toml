@@ -41,7 +41,7 @@ for pin in TOOLS_TOML_SHA256:tools/mise.toml TOOLS_LOCK_SHA256:tools/mise.lock; 
 done
 signers=$(mktemp)
 trap 'rm -f "$signers"' EXIT
-echo "claude-env $(cat "${SIGNER_PUBKEY:-$HOME/.ssh/id_ed25519.pub}")" > "$signers"
+echo "claude-env $(cat signing_key.pub)" > "$signers"
 for pair in bootstrap.sh:claude-env-bootstrap session-start.sh:claude-env-session-start; do
   ssh-keygen -Y verify -f "$signers" -I claude-env -n "${pair#*:}" -s "${pair%%:*}.sig" < "${pair%%:*}" ||
     { echo "${pair%%:*}: missing or stale signature, run mise run sign" >&2; exit 1; }

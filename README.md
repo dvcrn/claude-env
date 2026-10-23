@@ -19,8 +19,8 @@ Both scripts are signed with an SSH Ed25519 key and carry `# VERSION=<n>` on lin
 
 1. Bump its `# VERSION=` if old signed copies should no longer run.
 2. `mise run sign` signs both with `CLAUDE_ENV_SIGNING_KEY` from fnox, writing the `.sig` files.
-3. `mise run check` lints the scripts and confirms the pins and signatures match. Set
-   `SIGNER_PUBKEY` if the public key isn't `~/.ssh/id_ed25519.pub`.
+3. `mise run check` lints the scripts, checks the `tools/` pins, and verifies the signatures
+   against `signing_key.pub`.
 4. Commit the scripts and their `.sig` files together.
 
 After changing `tools/mise.toml`, regenerate the lockfile with
