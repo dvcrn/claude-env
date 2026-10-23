@@ -29,10 +29,8 @@ After changing `tools/mise.toml`, regenerate the lockfile with
 
 ## Using the stub
 
-1. Replace `SIGNER` in `stub.sh` with the signing public key, e.g. the contents of
-   `~/.ssh/id_ed25519.pub` (the comment part is ignored).
-2. Paste `stub.sh` as the environment's setup script.
-3. Give the environment a network secret for `cloud-env-broker.d.pn` carrying its broker
+1. Paste `stub.sh` as the environment's setup script. Its `SIGNER` is the key in `signing_key.pub`.
+2. Give the environment a network secret for `cloud-env-broker.d.pn` carrying its broker
    credentials.
 
 Raise `MIN_VERSION` in the stub to stop older signed copies of `bootstrap.sh` from running.

@@ -1,15 +1,11 @@
 #!/bin/bash
 # Setup script for a Claude Code cloud environment: verifies the signed bootstrap.sh from
-# claude-env and runs it. Identical in every environment; set SIGNER to the signing key.
+# claude-env and runs it. Identical in every environment; SIGNER is the key in signing_key.pub.
 set -euo pipefail
 
 BASE=https://raw.githubusercontent.com/dvcrn/claude-env/main
-SIGNER='ssh-ed25519 REPLACE_ME claude-env'
+SIGNER='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILI+2eft+G5merFwPUtQobbra0i34484V5mFe7aqb4KS claude-env-signing'
 MIN_VERSION=1
-
-case "$SIGNER" in
-  *REPLACE_ME*) echo "stub: SIGNER is still the placeholder, refusing to run" >&2; exit 1 ;;
-esac
 
 # The base image ships without openssh-client
 if ! command -v ssh-keygen > /dev/null; then
