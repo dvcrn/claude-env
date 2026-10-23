@@ -2,7 +2,7 @@
 """Setup and SessionStart bootstrap for Claude Code cloud environments.
 
 `setup` runs once from stub.sh after it verified this file's signature. It installs mise, the
-global tools, Tailscale and a copy of this file as the SessionStart hook. Holds no secrets.
+global tools and a copy of this file as the SessionStart hook. Holds no secrets.
 
 `session-start` runs from the hook on every session start and resume. It updates itself to the
 newest signed copy, loads secrets from the broker and 1Password into $CLAUDE_ENV_FILE, and
@@ -56,6 +56,8 @@ ALLOWED_SIGNERS = INSTALL_DIR / "allowed_signers"
 TOOLS_PATH = f"{HOME}/.local/bin:{HOME}/.local/share/mise/shims"
 
 LOG_FILE = Path("/tmp/session-start.log")
+TAILSCALED_LOG = Path("/tmp/tailscaled.log")
+TAILSCALED_SOCKET = Path("/var/run/tailscale/tailscaled.sock")
 INIT_MARKER = Path("/dev/shm/.cloud-env-initialized")
 TAILSCALE_MARKER = Path("/dev/shm/.cloud-env-tailscale")
 INGRESS_TOKEN_FILE = Path(
@@ -68,14 +70,24 @@ GITHUB_HOSTS = (
     "api.github.com,github.com,codeload.github.com,objects.githubusercontent.com,"
     "raw.githubusercontent.com,uploads.github.com"
 )
+REPO_MISE_CONFIGS = ("mise.toml", ".mise.toml", ".config/mise.toml", ".tool-versions")
+
 ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
-RESERVED_NAMES = {"PATH", "HOME", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH"}
+# Never taken from the broker or 1Password: they would change how this script or the shell runs
+RESERVED_NAMES = {
+    "PATH", "HOME", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "CLAUDE_ENV_FILE", "CLAUDE_PROJECT_DIR",
+}  # fmt: skip
 # Passed through to op, which needs the agent proxy to reach 1Password
 OP_PASSTHROUGH = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE")
+OP_TIMEOUT = 30
 # TS_AUTHKEY only goes to `tailscale up`, never into the session env
 TAILSCALE_ONLY = "TS_AUTHKEY"
 
 _log_lock = threading.Lock()
+
+
+# --- helpers --------------------------------------------------------------------------------
 
 
 def log(message: str, prefix: str = "") -> None:
@@ -84,16 +96,16 @@ def log(message: str, prefix: str = "") -> None:
         print(f"{stamp} {prefix}{message}", flush=True)
 
 
-def run(cmd: list[str], prefix: str = "", **kwargs) -> bool:
+def run(cmd: list[str], prefix: str = "", cwd: str | None = None) -> bool:
     """Runs cmd, logging its combined output line by line under prefix."""
     try:
         proc = subprocess.Popen(
             cmd,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            **kwargs,
         )
     except OSError as e:
         log(f"{cmd[0]}: {e}", prefix)
@@ -101,30 +113,14 @@ def run(cmd: list[str], prefix: str = "", **kwargs) -> bool:
     assert proc.stdout
     for line in proc.stdout:
         log(line.rstrip("\n"), prefix)
-    return proc.wait() == 0
+    if code := proc.wait():
+        log(f"{cmd[0]} exited with {code}", prefix)
+    return code == 0
 
 
 def download(url: str, dest: Path, timeout: float = 60) -> None:
     with urllib.request.urlopen(url, timeout=timeout) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
-
-
-def script_version(source: bytes) -> int | None:
-    match = re.search(rb"^VERSION = (\d+)$", source, re.MULTILINE)
-    return int(match.group(1)) if match else None
-
-
-def verify_signature(script: Path, sig: Path) -> bool:
-    with open(script, "rb") as f:
-        result = subprocess.run(
-            [
-                "ssh-keygen", "-Y", "verify", "-f", str(ALLOWED_SIGNERS),
-                "-I", "claude-env", "-n", SIGNING_NAMESPACE, "-s", str(sig),
-            ],
-            stdin=f,
-            capture_output=True,
-        )  # fmt: skip
-    return result.returncode == 0
 
 
 # --- setup ----------------------------------------------------------------------------------
@@ -215,7 +211,28 @@ def cmd_setup() -> int:
     return 0
 
 
-# --- session-start --------------------------------------------------------------------------
+# --- session-start: self-update -------------------------------------------------------------
+
+
+def script_version(source: bytes) -> int | None:
+    match = re.search(rb"^VERSION = (\d+)$", source, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def verify_signature(script: Path, sig: Path) -> bool:
+    cmd = [
+        "ssh-keygen", "-Y", "verify", "-f", str(ALLOWED_SIGNERS),
+        "-I", "claude-env", "-n", SIGNING_NAMESPACE, "-s", str(sig),
+    ]  # fmt: skip
+    try:
+        with open(script, "rb") as f:
+            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+    except OSError as e:
+        log(f"update: can't run ssh-keygen ({e})")
+        return False
+    if result.returncode != 0:
+        log(f"update: signature check failed: {result.stderr.strip()}")
+    return result.returncode == 0
 
 
 def self_update() -> None:
@@ -225,6 +242,7 @@ def self_update() -> None:
     version, so its VERSION is the floor: an old signed copy can't be replayed. Any failure
     keeps the installed copy.
     """
+    # Inside INSTALL_DIR so os.replace stays on one filesystem and is atomic
     with tempfile.TemporaryDirectory(dir=INSTALL_DIR) as tmp:
         script, sig = Path(tmp) / "bootstrap.py", Path(tmp) / "bootstrap.py.sig"
         try:
@@ -234,10 +252,7 @@ def self_update() -> None:
             log(f"update: fetch failed ({e}), running the installed copy")
             return
         source = script.read_bytes()
-        if source == SCRIPT.read_bytes():
-            return
-        if not verify_signature(script, sig):
-            log("update: signature check failed, running the installed copy")
+        if source == SCRIPT.read_bytes() or not verify_signature(script, sig):
             return
         version = script_version(source)
         if version is None or version < VERSION:
@@ -252,6 +267,9 @@ def self_update() -> None:
     )
 
 
+# --- session-start: secrets -----------------------------------------------------------------
+
+
 def ingress_sig_sample() -> str | None:
     """Returns <kid>.<sha256 of header.payload>.<signature> for the session ingress token.
 
@@ -260,7 +278,8 @@ def ingress_sig_sample() -> str | None:
     try:
         token = INGRESS_TOKEN_FILE.read_text().strip().removeprefix("sk-ant-si-")
         header, payload, signature = token.split(".")
-        kid = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))["kid"]
+        padded = header + "=" * (-len(header) % 4)
+        kid = json.loads(base64.urlsafe_b64decode(padded))["kid"]
     except (OSError, ValueError, KeyError, TypeError):
         return None
     digest = hashlib.sha256(f"{header}.{payload}".encode()).hexdigest()
@@ -278,16 +297,15 @@ def fetch_broker_env() -> dict[str, str] | None:
         if not isinstance(env, dict):
             raise TypeError
     except OSError as e:
-        log(
-            f"broker: {BROKER_URL} unreachable or refused the request ({e}), continuing without secrets"
-        )
+        log(f"broker: request to {BROKER_URL} failed ({e})")
         return None
     except (ValueError, KeyError, TypeError):
-        log("broker: unexpected response, continuing without secrets")
+        log("broker: unexpected response")
         return None
+    # The broker is remote input, so one bad entry rejects the whole response
     for name, value in env.items():
         if not ENV_NAME.fullmatch(name) or name in RESERVED_NAMES or not isinstance(value, str):
-            log(f"broker: invalid entry {name!r}, continuing without secrets")
+            log(f"broker: invalid entry {name!r}")
             return None
     return env
 
@@ -298,28 +316,27 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
     op runs `env -0` in an empty environment apart from what op itself needs, so every other
     variable in its output came from 1Password. NUL separators keep multiline values intact.
     """
+    # The real binary; the mise shim would add its own variables
     op_bin = subprocess.run(["mise", "which", "op"], capture_output=True, text=True).stdout.strip()
-    if not op_bin:  # the real binary; the mise shim would add its own variables
+    if not op_bin:
         log("1password: op is not installed")
         return None
     base_env = {"HOME": str(HOME), "OP_SERVICE_ACCOUNT_TOKEN": token}
     base_env |= {k: os.environ[k] for k in OP_PASSTHROUGH if k in os.environ}
     # --no-masking: op otherwise replaces secret values on stdout with a placeholder
-    cmd = [
-        op_bin,
-        "run",
-        "--no-masking",
-        "--environment",
-        environment_id,
-        "--",
-        "/usr/bin/env",
-        "-0",
-    ]
-    result = subprocess.run(cmd, env=base_env, capture_output=True, text=True)
+    cmd = [op_bin, "run", "--no-masking", "--environment", environment_id, "--", "/usr/bin/env", "-0"]  # fmt: skip
+    try:
+        result = subprocess.run(
+            cmd, env=base_env, capture_output=True, text=True, timeout=OP_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        log(f"1password: op run timed out after {OP_TIMEOUT}s")
+        return None
     if result.returncode != 0:
         log(f"1password: op run failed: {result.stderr.strip()}")
         return None
-    loaded = {}
+
+    variables = {}
     for entry in filter(None, result.stdout.split("\0")):
         name, _, value = entry.partition("=")
         if name in base_env or name in ("PWD", "SHLVL", "_"):
@@ -327,9 +344,31 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
         if not ENV_NAME.fullmatch(name) or name in RESERVED_NAMES:
             log(f"1password: skipping invalid name {name!r}")
             continue
-        loaded[name] = value
-    log(f"1password: loaded {' '.join(loaded) or 'nothing'}")
-    return loaded
+        variables[name] = value
+    log(f"1password: loaded {' '.join(variables) or 'nothing'}")
+    return variables
+
+
+def load_secrets() -> tuple[dict[str, str], bool]:
+    """Returns the session's secrets, and whether both the broker and 1Password delivered."""
+    broker = fetch_broker_env()
+    if broker is None:
+        log("broker: continuing without secrets")
+        return {}, False
+    token = broker.pop("OP_SERVICE_ACCOUNT_TOKEN", None)
+    environment_id = broker.pop("OP_ENVIRONMENT_ID", None)
+    log(f"broker: received {len(broker)} variables")
+    if not (token and environment_id):
+        log("1password: broker sent no token or environment ID, skipping")
+        return broker, False
+    onepassword = load_1password(token, environment_id)
+    if onepassword is None:
+        return broker, False
+    # Broker values win, so a broker-minted token replaces a long-lived one from 1Password
+    return onepassword | broker, True
+
+
+# --- session-start: git, GitHub and the session env -----------------------------------------
 
 
 # The harness writes user.name=Claude into ~/.gitconfig. GIT_AUTHOR_* only reach the Bash tool,
@@ -383,12 +422,39 @@ def write_env_block(lines: list[str]) -> bool:
     return True
 
 
+# --- session-start: Tailscale and repo tools ------------------------------------------------
+
+
 def tailscaled_running() -> bool:
     return subprocess.run(["pgrep", "-x", "tailscaled"], capture_output=True).returncode == 0
 
 
+def tailscale_needs_rejoin() -> bool:
+    """Whether this VM joined Tailscale earlier and tailscaled has since died."""
+    return TAILSCALE_MARKER.exists() and not tailscaled_running()
+
+
 # tailscaled inherits HTTPS_PROXY, which is what lets it reach the control plane. In-memory
-# state makes the node ephemeral; it is named after the session.
+# state makes the node ephemeral.
+def start_tailscaled(prefix: str) -> None:
+    with open(TAILSCALED_LOG, "ab") as out:
+        proc = subprocess.Popen(
+            ["tailscaled", "--state=mem:", "--no-logs-no-support"],
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=out,
+            start_new_session=True,
+        )
+    for _ in range(20):
+        if TAILSCALED_SOCKET.exists():
+            return
+        if proc.poll() is not None:
+            log(f"tailscaled exited with {proc.returncode}, see {TAILSCALED_LOG}", prefix)
+            return
+        time.sleep(0.5)
+    log(f"tailscaled socket did not appear after 10s, see {TAILSCALED_LOG}", prefix)
+
+
 def join_tailscale(authkey: str | None) -> None:
     prefix = "[tailscale] "
     if not shutil.which("tailscaled"):
@@ -398,54 +464,42 @@ def join_tailscale(authkey: str | None) -> None:
         log("no TS_AUTHKEY, skipping", prefix)
         return
     if not tailscaled_running():
-        with open("/tmp/tailscaled.log", "ab") as out:
-            subprocess.Popen(
-                ["tailscaled", "--state=mem:", "--no-logs-no-support"],
-                stdin=subprocess.DEVNULL,
-                stdout=out,
-                stderr=out,
-                start_new_session=True,
-            )
-        sock = Path("/var/run/tailscale/tailscaled.sock")
-        for _ in range(20):
-            if sock.exists():
-                break
-            time.sleep(0.5)
+        start_tailscaled(prefix)
     session = os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "unknown").removeprefix("cse_")
     hostname = "claude-" + session.lower().replace("_", "-")
-    up = [
-        "tailscale",
-        "up",
-        f"--auth-key={authkey}",
-        f"--hostname={hostname}",
-        "--timeout=60s",
-    ]
-    if not run(up, prefix):
-        log("failed", prefix)
-        return
-    run(["tailscale", "status", "--peers=false"], prefix)
-    TAILSCALE_MARKER.touch()
+    up = ["tailscale", "up", f"--auth-key={authkey}", f"--hostname={hostname}", "--timeout=60s"]
+    if run(up, prefix):
+        run(["tailscale", "status", "--peers=false"], prefix)
+        TAILSCALE_MARKER.touch()
 
 
 def install_repo_tools() -> None:
     project = os.environ.get("CLAUDE_PROJECT_DIR")
-    if not project or not (Path(project) / "mise.toml").is_file():
+    if not project or not any((Path(project) / name).is_file() for name in REPO_MISE_CONFIGS):
         return
     prefix = "[mise] "
-    if not (
-        run(["mise", "trust"], prefix, cwd=project)
-        and run(["mise", "install", "--yes"], prefix, cwd=project)
-    ):
-        log("repo install failed", prefix)
+    if run(["mise", "trust"], prefix, cwd=project):
+        run(["mise", "install", "--yes"], prefix, cwd=project)
+
+
+# --- session-start --------------------------------------------------------------------------
 
 
 def session_start(update: bool) -> None:
+    """Prepares the session. Every step logs its failure and the session starts regardless.
+
+    1. On resume, stop unless Tailscale needs rejoining: the VM kept everything else.
+    2. Update to the newest signed copy of this script.
+    3. Load secrets from the broker and 1Password.
+    4. Configure git and GitHub, and write the session env to $CLAUDE_ENV_FILE.
+    5. Join Tailscale and install the repo's mise tools in parallel.
+    """
     log("== session-start")
     os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ.get('PATH', '')}"
 
-    # A resumed VM keeps /dev/shm, its processes and the session env, so only Tailscale is checked
-    if INIT_MARKER.exists():
-        if not TAILSCALE_MARKER.exists() or tailscaled_running():
+    resuming = INIT_MARKER.exists()
+    if resuming:
+        if not tailscale_needs_rejoin():
             log("resume: state intact, nothing to do")
             return
         log("resume: tailscaled is gone, running the full start to rejoin")
@@ -454,36 +508,25 @@ def session_start(update: bool) -> None:
         self_update()
     log(f"running version {VERSION}")
 
-    secrets = None
-    if (broker := fetch_broker_env()) is not None:
-        op_token = broker.pop("OP_SERVICE_ACCOUNT_TOKEN", None)
-        op_environment_id = broker.pop("OP_ENVIRONMENT_ID", None)
-        log(f"broker: received {len(broker)} variables")
-        if op_token and op_environment_id:
-            secrets = load_1password(op_token, op_environment_id)
-        else:
-            log("1password: broker sent no token or environment ID, skipping")
+    secrets, complete = load_secrets()
+    tailscale_authkey = secrets.pop(TAILSCALE_ONLY, None)
+    os.environ.update(secrets)
 
-    # Broker values come after the 1Password ones, so a broker-minted token wins
-    loaded = {**(secrets or {}), **(broker or {})}
-    os.environ.update(loaded)
-    tailscale_authkey = os.environ.pop(TAILSCALE_ONLY, None)
-
-    lines = [f'export PATH="{TOOLS_PATH}:$PATH"']
-    lines += [f"export {k}={shlex.quote(v)}" for k, v in loaded.items() if k != TAILSCALE_ONLY]
     set_git_identity()
+    lines = [f'export PATH="{TOOLS_PATH}:$PATH"']
+    lines += [f"export {name}={shlex.quote(value)}" for name, value in secrets.items()]
     lines += use_github_directly()
-    if write_env_block(lines) and secrets is not None:
+    if resuming and not complete:
+        # The session already has the env from its first start; rewriting would drop secrets
+        log("env: secrets incomplete, keeping the env file from the last start")
+    elif write_env_block(lines) and complete:
         INIT_MARKER.touch()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        tasks = [
-            pool.submit(join_tailscale, tailscale_authkey),
-            pool.submit(install_repo_tools),
-        ]
+        tasks = [pool.submit(join_tailscale, tailscale_authkey), pool.submit(install_repo_tools)]
     for task in tasks:
-        if task.exception():
-            log(f"step failed: {task.exception()!r}")
+        if error := task.exception():
+            log(f"step failed: {error!r}")
     log("== session-start done")
 
 
