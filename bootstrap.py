@@ -384,6 +384,9 @@ def set_git_identity() -> None:
         return
     run(["git", "config", "--global", "user.name", name], "[git] ")
     run(["git", "config", "--global", "user.email", email], "[git] ")
+    # The harness signing key is registered to noreply@anthropic.com, and while signing is on its
+    # Stop hook asks for every other committer's commits to be rewritten to that address
+    run(["git", "config", "--global", "commit.gpgsign", "false"], "[git] ")
 
 
 # The agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos.
