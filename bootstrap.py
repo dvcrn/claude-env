@@ -8,6 +8,9 @@ global tools and a copy of this file as the SessionStart hook. Holds no secrets.
 newest signed copy, loads secrets from the broker and 1Password into $CLAUDE_ENV_FILE, and
 configures git, GitHub, Tailscale and the repo's mise tools. Without the broker the session
 starts without secrets. Logs to /tmp/session-start.log.
+
+`pre-tool-use` runs from the PreToolUse hook. It strips the Claude Code footer from GitHub MCP
+tool input, and denies Bash commands and file writes that contain it.
 """
 
 from __future__ import annotations
@@ -84,6 +87,28 @@ OP_TIMEOUT = 30
 # TS_AUTHKEY only goes to `tailscale up`, never into the session env
 TAILSCALE_ONLY = "TS_AUTHKEY"
 
+# Claude Code footer on GitHub posts, including any --- separator above it
+FOOTER = re.compile(
+    r"\n*(?:-{3,}[ \t]*\n+)?(?:🤖 )?_?Generated (?:by|with) "
+    r"\[Claude Code\]\(https://claude\.(?:ai/code|com/claude-code)[^)]*\)_?[ \t]*"
+)
+PRE_TOOL_USE_MATCHER = r"^(Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*[Gg]it[Hh]ub.*)$"
+# The proxied GitHub MCP server appends the footer after this hook runs, so these tools are
+# denied and posts go through gh
+PROXIED_GITHUB_WRITES = tuple(
+    f"mcp__github__{name}"
+    for name in (
+        "add_comment_to_pending_review",
+        "add_issue_comment",
+        "add_reply_to_pull_request_comment",
+        "create_pull_request",
+        "issue_write",
+        "pull_request_review_write",
+        "update_issue_comment",
+        "update_pull_request",
+    )
+)
+
 _log_lock = threading.Lock()
 
 
@@ -154,8 +179,19 @@ def install_self(signer: str) -> None:
     shutil.copy(here.with_name("bootstrap.py.sig"), SCRIPT.with_name("bootstrap.py.sig"))
 
 
-def hook_command() -> str:
-    return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} session-start"
+def hook_command(subcommand: str) -> str:
+    return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} {subcommand}"
+
+
+def set_hook(hooks: dict, event: str, group: dict) -> None:
+    """Replaces this script's hook group for event with group."""
+    groups = hooks.setdefault(event, [])
+    groups[:] = [
+        existing
+        for existing in groups
+        if not any(str(SCRIPT) in hook.get("command", "") for hook in existing.get("hooks", []))
+    ]
+    groups.append(group)
 
 
 # Merges into the existing settings so keys set by the image survive
@@ -170,18 +206,17 @@ def write_claude_settings() -> None:
         settings = {}
 
     settings["attribution"] = {"commit": "", "pr": "", "sessionUrl": False}
-    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    permissions = settings.setdefault("permissions", {})
+    allow = permissions.setdefault("allow", [])
     allow += [rule for rule in ("Bash(op:*)", "Bash(jq:*)") if rule not in allow]
+    deny = permissions.setdefault("deny", [])
+    deny += [rule for rule in PROXIED_GITHUB_WRITES if rule not in deny]
 
-    session_start = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
-    session_start[:] = [
-        group
-        for group in session_start
-        if not any(str(SCRIPT) in hook.get("command", "") for hook in group.get("hooks", []))
-    ]
-    session_start.append(
-        {"hooks": [{"type": "command", "command": hook_command(), "timeout": 600}]}
-    )
+    hooks = settings.setdefault("hooks", {})
+    session_start = {"type": "command", "command": hook_command("session-start"), "timeout": 600}
+    set_hook(hooks, "SessionStart", {"hooks": [session_start]})
+    pre_tool_use = {"type": "command", "command": hook_command("pre-tool-use"), "timeout": 10}
+    set_hook(hooks, "PreToolUse", {"matcher": PRE_TOOL_USE_MATCHER, "hooks": [pre_tool_use]})
 
     path.write_text(json.dumps(settings, indent=2) + "\n")
 
@@ -561,13 +596,65 @@ def cmd_session_start(update: bool) -> int:
     return 0
 
 
+# --- pre-tool-use ---------------------------------------------------------------------------
+
+
+def strip_footer(value: object) -> object:
+    if isinstance(value, str):
+        # Keeps one line break where the footer sat mid-text, so paragraphs don't merge
+        return FOOTER.sub(lambda m: "" if m.end() == len(m.string) else "\n", value)
+    if isinstance(value, list):
+        return [strip_footer(item) for item in value]
+    if isinstance(value, dict):
+        return {k: strip_footer(v) for k, v in value.items()}
+    return value
+
+
+def has_footer(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(FOOTER.search(value))
+    if isinstance(value, list):
+        return any(has_footer(item) for item in value)
+    if isinstance(value, dict):
+        # old_string has to match the file as it is, footer included
+        return any(has_footer(v) for k, v in value.items() if k != "old_string")
+    return False
+
+
+def cmd_pre_tool_use() -> int:
+    """Strips the footer from MCP tool input through updatedInput. Bash and file writes are
+    denied instead, since rewriting shell or file content behind Claude's back is not safe.
+    Malformed events pass through unchanged."""
+    try:
+        event = json.load(sys.stdin)
+        tool, tool_input = event["tool_name"], event["tool_input"]
+    except (ValueError, KeyError, TypeError):
+        return 0
+    if not isinstance(tool, str) or not isinstance(tool_input, dict):
+        return 0
+    if tool.startswith("mcp__"):
+        cleaned = strip_footer(tool_input)
+        if cleaned == tool_input:
+            return 0
+        output = {"updatedInput": cleaned}
+    elif has_footer(tool_input):
+        reason = "Remove the 'Generated by Claude Code' footer and retry."
+        output = {"permissionDecision": "deny", "permissionDecisionReason": reason}
+    else:
+        return 0
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **output}}))
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
     if args[:1] == ["setup"]:
         return cmd_setup()
     if args[:1] == ["session-start"]:
         return cmd_session_start(update="--no-update" not in args)
-    sys.exit("usage: bootstrap.py setup | session-start [--no-update]")
+    if args[:1] == ["pre-tool-use"]:
+        return cmd_pre_tool_use()
+    sys.exit("usage: bootstrap.py setup | session-start [--no-update] | pre-tool-use")
 
 
 CLAUDE_MD = """\

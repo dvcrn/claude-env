@@ -4,11 +4,12 @@ A signed bootstrap for Claude Code cloud environments. Every environment runs th
 stub, which verifies and runs `bootstrap.py` from this repo, so no environment's setup script
 holds secrets or needs editing when the bootstrap changes.
 
-| File                         | Runs                              | Does                                                                                                                                                                                             |
-| ---------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `stub.sh`                    | as the environment's setup script | Verifies `bootstrap.py` against `SIGNER` and runs `bootstrap.py setup`                                                                                                                           |
-| `bootstrap.py setup`         | once, at setup                    | Installs mise and the tools in `GLOBAL_TOOLS` (op, Tailscale, gh, ...), installs itself as the SessionStart hook, and writes `~/.claude/settings.json` and `~/.claude/CLAUDE.md`. No secrets     |
-| `bootstrap.py session-start` | on every session start and resume | Updates itself to the newest signed copy, loads secrets from `https://cloud-env-broker.d.pn` and 1Password into the session env, and configures git, GitHub, Tailscale and the repo's mise tools |
+| File                         | Runs                                         | Does                                                                                                                                                                                             |
+| ---------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `stub.sh`                    | as the environment's setup script            | Verifies `bootstrap.py` against `SIGNER` and runs `bootstrap.py setup`                                                                                                                           |
+| `bootstrap.py setup`         | once, at setup                               | Installs mise and the tools in `GLOBAL_TOOLS` (op, Tailscale, gh, ...), installs itself as the SessionStart hook, and writes `~/.claude/settings.json` and `~/.claude/CLAUDE.md`. No secrets     |
+| `bootstrap.py session-start` | on every session start and resume            | Updates itself to the newest signed copy, loads secrets from `https://cloud-env-broker.d.pn` and 1Password into the session env, and configures git, GitHub, Tailscale and the repo's mise tools |
+| `bootstrap.py pre-tool-use`  | before GitHub MCP, Bash and file-write calls | Strips the Claude Code footer from GitHub MCP input and denies Bash commands and file writes that contain it. Setup denies the proxied `mcp__github__` write tools, so posts go through `gh`     |
 
 `bootstrap.py` is a single Python script using only the standard library.
 
