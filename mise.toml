@@ -36,3 +36,23 @@ echo "claude-env $(cat signing_key.pub)" > "$signers"
 ssh-keygen -Y verify -f "$signers" -I claude-env -n claude-env -s bootstrap.py.sig < bootstrap.py ||
   { echo "bootstrap.py: missing or stale signature, run mise run sign" >&2; exit 1; }
 '''
+
+[tasks.precommit]
+description = "Lint, then confirm the staged bootstrap.py.sig matches the staged bootstrap.py"
+depends = ["lint"]
+shell = "bash -c"
+run = '''
+set -euo pipefail
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+echo "claude-env $(cat signing_key.pub)" > "$dir/allowed_signers"
+git show :bootstrap.py > "$dir/bootstrap.py"
+git show :bootstrap.py.sig > "$dir/bootstrap.py.sig" 2> /dev/null || true
+ssh-keygen -Y verify -f "$dir/allowed_signers" -I claude-env -n claude-env \
+  -s "$dir/bootstrap.py.sig" < "$dir/bootstrap.py" ||
+  { echo "staged bootstrap.py: missing or stale signature, run mise run sign and stage bootstrap.py.sig" >&2; exit 1; }
+'''
+
+[tasks.install-hooks]
+description = "Install the git pre-commit hook that runs mise run precommit"
+run = "mise generate git-pre-commit --write --task=precommit"

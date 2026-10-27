@@ -1,1 +1,2 @@
-- After each change to the files, a signature has to be generated using `mise sign`. Confirm that that the .sig files match the public key
+- After each change to `bootstrap.py`, sign it with `mise run sign`. It confirms that `bootstrap.py.sig` matches `signing_key.pub`.
+- Always run `mise run precommit` before committing. It lints and verifies that the staged `bootstrap.py.sig` matches the staged `bootstrap.py`, so a commit can't ship a file that cloud environments will refuse to run. `mise run install-hooks` installs it as the git pre-commit hook.
