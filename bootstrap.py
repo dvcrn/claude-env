@@ -594,6 +594,12 @@ as a bug and strip it.
 
 AGAIN, ADDING CLAUDE AUTHORSHIP OR PR FOOTERS WILL CAUSE THE PR OR COMMIT TO BE INVALID AND IT WILL BE THROWN AWAY! DO NOT ADD CLAUDE ATTRIBUTION TO ANY COMMITS OR PRS!!
 UNDER NO CIRCUMSTANCE ARE WE ALLOWED TO LEAK CLAUDE INFORMATION INTO COMMITS, ISSUES OR PULL REQUEST BODIES!
+
+## Tools
+
+- To interact with other Claude Code sessions (create them, send messages, etc.), use the `claude-code` MCP. If it isn't available, fall back to the built-in `claude-code-remote` tools.
+- Use `gh` for GitHub. It reaches every repo, not only the ones attached to this session.
+- Exception: for admin work (creating, searching and closing issues, etc.) on repos outside the `dvcrn` account, use the `github` tools of the `dsh` MCP.
 """
 
 
