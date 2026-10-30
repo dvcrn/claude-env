@@ -707,6 +707,14 @@ as a bug and strip it.
 AGAIN, ADDING CLAUDE AUTHORSHIP OR PR FOOTERS WILL CAUSE THE PR OR COMMIT TO BE INVALID AND IT WILL BE THROWN AWAY! DO NOT ADD CLAUDE ATTRIBUTION TO ANY COMMITS OR PRS!!
 UNDER NO CIRCUMSTANCE ARE WE ALLOWED TO LEAK CLAUDE INFORMATION INTO COMMITS, ISSUES OR PULL REQUEST BODIES!
 
+## Pull requests
+
+After creating a PR, keep watching it for review activity until it is merged or closed.
+
+- Use native PR watch or subscribe tools if available. Otherwise poll with `gh`: every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes. Any new activity resets the interval to 5 minutes. Stop after 24 hours without activity. Waits longer than the shell tool timeout must be split across multiple calls.
+- Activity means review comments, PR comments, review submissions, and failing checks.
+- Handle every comment, including ones you decide not to act on. Fix it, or reply briefly with why not, then resolve the review thread. For top-level comments that can't be resolved, reply. Use the `address-pr-review-comments` skill.
+
 ## Tools
 
 - To interact with other Claude Code sessions (create them, send messages, etc.), use the `claude-code` MCP. If it isn't available, fall back to the built-in `claude-code-remote` tools.
