@@ -109,6 +109,28 @@ PROXIED_GITHUB_WRITES = tuple(
     )
 )
 
+ALLOWED_COMMANDS = (
+    "Bash(op:*)",
+    "Bash(jq:*)",
+    "Bash(gh pr view:*)",
+    "Bash(gh pr diff:*)",
+    "Bash(gh pr checks:*)",
+    "Bash(gh pr comment:*)",
+)
+# The default External System Writes rule excludes thread replies and resolves, so
+# addressing review feedback through gh api gets blocked in auto mode
+AUTO_MODE_ALLOW = (
+    "PR Review Thread Work: When the user's own message asked the agent to work on, babysit, "
+    "or address review feedback on a specific PR in the repository this session was started "
+    "for, these writes on that PR are allowed: replying to its review comments or threads "
+    "(`gh api` POST `repos/{o}/{r}/pulls/{n}/comments/{id}/replies`, GraphQL "
+    "`addPullRequestReviewThreadReply`), resolving or unresolving its review threads (GraphQL "
+    "`resolveReviewThread`/`unresolveReviewThread`), posting PR comments, editing comments the "
+    "agent posted in this session, and re-requesting review from existing reviewers. Does not "
+    "cover merging, closing, approving or requesting changes, label or base changes, or writes "
+    "to any other PR or repository."
+)
+
 _log_lock = threading.Lock()
 
 
@@ -208,9 +230,12 @@ def write_claude_settings() -> None:
     settings["attribution"] = {"commit": "", "pr": "", "sessionUrl": False}
     permissions = settings.setdefault("permissions", {})
     allow = permissions.setdefault("allow", [])
-    allow += [rule for rule in ("Bash(op:*)", "Bash(jq:*)") if rule not in allow]
+    allow += [rule for rule in ALLOWED_COMMANDS if rule not in allow]
     deny = permissions.setdefault("deny", [])
     deny += [rule for rule in PROXIED_GITHUB_WRITES if rule not in deny]
+
+    auto_allow = settings.setdefault("autoMode", {}).setdefault("allow", [])
+    auto_allow += [rule for rule in ("$defaults", AUTO_MODE_ALLOW) if rule not in auto_allow]
 
     hooks = settings.setdefault("hooks", {})
     session_start = {"type": "command", "command": hook_command("session-start"), "timeout": 600}
