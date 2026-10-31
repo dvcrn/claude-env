@@ -718,8 +718,8 @@ After creating a PR, keep watching it for review activity until it is merged or 
 ## Tools
 
 - To interact with other Claude Code sessions (create them, send messages, etc.), use the `claude-code` MCP. If it isn't available, fall back to the built-in `claude-code-remote` tools.
-- Use `gh` for GitHub. It reaches every repo, not only the ones attached to this session.
-- Exception: for admin work (creating, searching and closing issues, etc.) on repos outside the `dvcrn` account, use the `github` tools of the `dsh` MCP.
+- Use `gh` for everything on GitHub under the `dvcrn` account (public and private repos), and for reading any public repo. Its token can't write outside `dvcrn`.
+- To create issues or post comments on public repos outside `dvcrn`, use the `github` tools of the `dpn` MCP.
 """
 
 
