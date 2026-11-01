@@ -10,12 +10,18 @@ configures git, GitHub, Tailscale and the repo's mise tools. Without the broker 
 starts without secrets. Logs to /tmp/session-start.log.
 
 `pre-tool-use` runs from the PreToolUse hook. It strips the Claude Code footer from GitHub MCP
-tool input, and denies Bash commands and file writes that contain it.
+tool input, and denies Bash commands and file writes that contain it. Before Bash calls it also
+refreshes the boticorn tokens when they near expiry.
+
+`git-credential` is git's credential helper for github.com. It returns the boticorn token of the
+remote's owner, or the default token.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -74,6 +80,26 @@ GITHUB_HOSTS = (
     "raw.githubusercontent.com,uploads.github.com"
 )
 REPO_MISE_CONFIGS = ("mise.toml", ".mise.toml", ".config/mise.toml", ".tool-versions")
+
+# One file per owner with that owner's boticorn token. Underscore names can't clash with
+# owners: `_default` serves other owners, `_stamp` times the next refresh, `_lock` guards it.
+TOKEN_DIR = Path("/dev/shm/cloud-env-github")
+DEFAULT_TOKEN = "_default"
+TOKEN_STAMP = TOKEN_DIR / "_stamp"
+TOKEN_LOCK = TOKEN_DIR / "_lock"
+# Installation tokens expire after an hour
+TOKEN_REFRESH_AFTER = 50 * 60
+TOKEN_RETRY_AFTER = 5 * 60
+GITHUB_OWNER = re.compile(r"[a-z0-9][a-z0-9-]*")
+BOTICORN_GITCONFIG = HOME / ".config" / "git" / "boticorn"
+BOTICORN_NAME = "boticorn[bot]"
+BOTICORN_EMAIL = "323198915+boticorn[bot]@users.noreply.github.com"
+# Kept out of the session env: git identity variables override the per-owner identity in git
+# config, and gh prefers token variables over its login, which the refresh keeps current
+SESSION_ENV_EXCLUDED = {
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    "GITHUB_TOKEN", "GH_TOKEN", "BOTICORN_TOKENS",
+}  # fmt: skip
 
 ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 # Never taken from the broker or 1Password: they would change how this script or the shell runs
@@ -266,7 +292,7 @@ def cmd_setup() -> int:
     install_global_tools()
     install_self(signer)
     write_claude_settings()
-    (CLAUDE_DIR / "CLAUDE.md").write_text(CLAUDE_MD)
+    (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md([], None, None))
     print(f"bootstrap: version {VERSION} complete")
     return 0
 
@@ -346,7 +372,7 @@ def ingress_sig_sample() -> str | None:
     return f"{kid}.{digest}.{signature}"
 
 
-def fetch_broker_env() -> dict[str, str] | None:
+def fetch_broker_env(timeout: float = 20) -> dict[str, str] | None:
     headers = {
         # Cloudflare's Browser Integrity Check rejects urllib's default User-Agent (error 1010)
         "User-Agent": f"claude-env-bootstrap/{VERSION}",
@@ -356,7 +382,7 @@ def fetch_broker_env() -> dict[str, str] | None:
         headers["X-Ingress-Sig-Sample"] = sample
     request = urllib.request.Request(f"{BROKER_URL}/v1/session-env", headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=20) as resp:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             env = json.load(resp)["env"]
         if not isinstance(env, dict):
             raise TypeError
@@ -435,42 +461,202 @@ def load_secrets() -> tuple[dict[str, str], bool]:
 # --- session-start: git, GitHub and the session env -----------------------------------------
 
 
-# The harness writes user.name=Claude into ~/.gitconfig. GIT_AUTHOR_* only reach the Bash tool,
-# so the identity from 1Password goes into git config too for anything else that commits.
-def set_git_identity() -> None:
+# The harness writes user.name=Claude into ~/.gitconfig. The user's identity from 1Password is
+# the global default, and repos with a boticorn token commit as boticorn instead.
+def set_git_identity(owners: list[str]) -> None:
     name, email = os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL")
-    if not name or not email:
+    if name and email:
+        run(["git", "config", "--global", "user.name", name], "[git] ")
+        run(["git", "config", "--global", "user.email", email], "[git] ")
+    else:
         log("git: no GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL, keeping the existing identity")
-        return
-    run(["git", "config", "--global", "user.name", name], "[git] ")
-    run(["git", "config", "--global", "user.email", email], "[git] ")
     # The harness signing key is registered to noreply@anthropic.com, and while signing is on its
     # Stop hook asks for every other committer's commits to be rewritten to that address
     run(["git", "config", "--global", "commit.gpgsign", "false"], "[git] ")
 
+    if not owners:
+        log("git: no boticorn tokens, keeping the boticorn identity config from earlier starts")
+        return
+    BOTICORN_GITCONFIG.parent.mkdir(parents=True, exist_ok=True)
+    BOTICORN_GITCONFIG.write_text(f"[user]\n\tname = {BOTICORN_NAME}\n\temail = {BOTICORN_EMAIL}\n")
+    # Drops the includes of earlier starts, so an owner the broker no longer mints for stops matching
+    found = subprocess.run(
+        ["git", "config", "--global", "--get-regexp", r"^includeif\..*\.path$"],
+        capture_output=True,
+        text=True,
+    )
+    for line in found.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if value == str(BOTICORN_GITCONFIG):
+            subprocess.run(["git", "config", "--global", "--unset-all", key], capture_output=True)
+    # `**/<owner>/**` also matches the agent proxy's http://127.0.0.1:<port>/git/<owner>/<repo>.
+    # git only supports `remote.*.url` here, so any remote on a boticorn owner counts, upstream too.
+    for owner in owners:
+        for pattern in (f"**/{owner}/**", f"git@github.com:{owner}/**"):
+            key = f"includeIf.hasconfig:remote.*.url:{pattern}.path"
+            run(["git", "config", "--global", key, str(BOTICORN_GITCONFIG)], "[git] ")
 
-# The agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos.
-# Sending GitHub traffic direct with the real GITHUB_TOKEN lets gh, git and mise reach any repo.
-# Returns the env file lines that do the same for the session.
-def use_github_directly() -> list[str]:
-    if not os.environ.get("GITHUB_TOKEN"):
-        log("github: no GITHUB_TOKEN, leaving GitHub traffic on the agent proxy")
-        return []
+
+def boticorn_tokens(raw: str | None) -> dict[str, str]:
+    """Parses the broker's BOTICORN_TOKENS, a JSON object of owner to installation token."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        log("github: BOTICORN_TOKENS is not JSON")
+        return {}
+    if not isinstance(parsed, dict):
+        log("github: BOTICORN_TOKENS is not an object")
+        return {}
+    tokens = {}
+    for owner, token in parsed.items():
+        valid_owner = isinstance(owner, str) and GITHUB_OWNER.fullmatch(owner.lower())
+        if valid_owner and isinstance(token, str) and token:
+            tokens[owner.lower()] = token
+            continue
+        log(f"github: skipping invalid BOTICORN_TOKENS entry {owner!r}")
+    return tokens
+
+
+def repo_owner() -> str | None:
+    """Returns the lowercased owner of the session repo's origin remote."""
+    if not (project := os.environ.get("CLAUDE_PROJECT_DIR")):
+        return None
+    url = subprocess.run(
+        ["git", "-C", project, "remote", "get-url", "origin"], capture_output=True, text=True
+    ).stdout.strip()
+    match = re.search(r"[/:]([^/:]+)/[^/]+?(?:\.git)?/?$", url)
+    owner = match.group(1).lower() if match else ""
+    return owner if GITHUB_OWNER.fullmatch(owner) else None
+
+
+def gh_owner(tokens: dict[str, str], default: str | None) -> str | None:
+    """Returns the owner whose token install_github_tokens logs gh in with."""
+    owner = repo_owner()
+    if owner in tokens:
+        return owner
+    return next((name for name, token in tokens.items() if token == default), None)
+
+
+def write_token(name: str, token: str) -> None:
+    tmp = TOKEN_DIR / f".{name}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    os.replace(tmp, TOKEN_DIR / name)
+
+
+def install_github_tokens(tokens: dict[str, str], default: str | None) -> None:
+    """Writes the token files and logs gh in with the token for the session repo's owner.
+
+    Tokens of owners missing from tokens are kept: they still work until they expire.
+    """
+    TOKEN_DIR.mkdir(mode=0o700, exist_ok=True)
+    TOKEN_DIR.chmod(0o700)
+    for owner, token in tokens.items():
+        write_token(owner, token)
+    if default:
+        write_token(DEFAULT_TOKEN, default)
+    if tokens:
+        TOKEN_STAMP.touch()
+
+    owner = repo_owner()
+    token = tokens.get(owner or "") or default
+    if not token:
+        return
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+    env["PATH"] = f"{TOOLS_PATH}:{env.get('PATH', '')}"
+    cmd = ["gh", "auth", "login", "--with-token", "--insecure-storage", "--hostname", "github.com"]
+    try:
+        result = subprocess.run(
+            cmd, input=token, env=env, capture_output=True, text=True, timeout=3
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"github: gh auth login failed ({e})")
+        return
+    if result.returncode != 0:
+        log(f"github: gh auth login failed: {result.stderr.strip()}")
+        return
+    log(
+        f"github: gh uses the {'boticorn token for ' + owner if owner in tokens else 'default token'}"
+    )
+
+
+def bypass_proxy_for_github() -> None:
     for var in ("NO_PROXY", "no_proxy"):
         os.environ[var] = ",".join(filter(None, [os.environ.get(var), GITHUB_HOSTS]))
-    os.environ["GH_TOKEN"] = os.environ["GITHUB_TOKEN"]
-    # The empty helper drops ones configured earlier; ours reads the token at run time, so it
-    # never hits disk
+
+
+# The agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos.
+# Sending GitHub traffic direct lets gh, git and mise reach any repo. git picks the token file
+# by the repo's owner, and gh uses the session repo owner's token. Returns the env file lines.
+def use_github_directly(tokens: dict[str, str], default: str | None) -> list[str]:
+    if not tokens and not default:
+        log("github: no GitHub token, leaving GitHub traffic on the agent proxy")
+        return []
+    bypass_proxy_for_github()
+    install_github_tokens(tokens, default)
+    # The empty helper drops ones configured earlier
     key = "credential.https://github.com.helper"
     subprocess.run(["git", "config", "--global", "--unset-all", key], capture_output=True)
     run(["git", "config", "--global", "--add", key, ""], "[git] ")
-    helper = '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'
-    run(["git", "config", "--global", "--add", key, helper], "[git] ")
+    run(["git", "config", "--global", "--add", key, "!" + hook_command("git-credential")], "[git] ")
+    run(
+        ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"], "[git] "
+    )
     return [
         f'export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}{GITHUB_HOSTS}"',
         f'export no_proxy="${{no_proxy:+$no_proxy,}}{GITHUB_HOSTS}"',
-        'export GH_TOKEN="$GITHUB_TOKEN"',
+        "unset GH_TOKEN GITHUB_TOKEN",
     ]
+
+
+def refresh_github_tokens() -> None:
+    """Re-mints the boticorn tokens before they expire. Runs before every Bash call, so the stamp
+    file limits it to one attempt per TOKEN_REFRESH_AFTER, or TOKEN_RETRY_AFTER after a failure.
+    """
+    try:
+        if time.time() - TOKEN_STAMP.stat().st_mtime < TOKEN_REFRESH_AFTER:
+            return
+    except FileNotFoundError:
+        return  # the session has no boticorn tokens
+    with open(TOKEN_LOCK, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return  # a parallel Bash call is refreshing
+        if time.time() - TOKEN_STAMP.stat().st_mtime < TOKEN_REFRESH_AFTER:
+            return
+        # Schedules the retry first: urlopen's timeout doesn't bound DNS or the whole response,
+        # and if the hook gets killed at its 10s limit, the next attempt still waits
+        retry_at = time.time() - TOKEN_REFRESH_AFTER + TOKEN_RETRY_AFTER
+        os.utime(TOKEN_STAMP, (retry_at, retry_at))
+        env = fetch_broker_env(timeout=4) or {}
+        tokens = boticorn_tokens(env.get("BOTICORN_TOKENS"))
+        if not tokens:
+            log("github: token refresh failed, keeping the current tokens")
+            return
+        bypass_proxy_for_github()
+        install_github_tokens(tokens, env.get("GITHUB_TOKEN"))
+        log(f"github: refreshed tokens for {' '.join(sorted(tokens))}")
+
+
+def cmd_git_credential(args: list[str]) -> int:
+    """git credential helper: answers `get` with the token for the remote's owner."""
+    if args[:1] != ["get"]:
+        return 0
+    fields = dict(line.partition("=")[::2] for line in sys.stdin.read().splitlines())
+    owner = fields.get("path", "").lstrip("/").split("/", 1)[0].lower()
+    names = [owner] if GITHUB_OWNER.fullmatch(owner) else []
+    for name in [*names, DEFAULT_TOKEN]:
+        try:
+            token = (TOKEN_DIR / name).read_text().strip()
+        except OSError:
+            continue
+        print(f"username=x-access-token\npassword={token}")
+        return 0
+    return 0
 
 
 def write_env_block(lines: list[str]) -> bool:
@@ -588,12 +774,27 @@ def session_start(update: bool) -> None:
 
     secrets, complete = load_secrets()
     tailscale_authkey = secrets.pop(TAILSCALE_ONLY, None)
+    tokens = boticorn_tokens(secrets.pop("BOTICORN_TOKENS", None))
     os.environ.update(secrets)
 
-    set_git_identity()
+    owners = sorted(tokens)
+    set_git_identity(owners)
+    identity = (os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL"))
+    if owners or not resuming:
+        (CLAUDE_DIR / "CLAUDE.md").write_text(
+            render_claude_md(
+                owners,
+                identity if all(identity) else None,
+                gh_owner(tokens, secrets.get("GITHUB_TOKEN")),
+            )
+        )
     lines = [f'export PATH="{TOOLS_PATH}:$PATH"']
-    lines += [f"export {name}={shlex.quote(value)}" for name, value in secrets.items()]
-    lines += use_github_directly()
+    lines += [
+        f"export {name}={shlex.quote(value)}"
+        for name, value in secrets.items()
+        if name not in SESSION_ENV_EXCLUDED
+    ]
+    lines += use_github_directly(tokens, secrets.get("GITHUB_TOKEN"))
     if resuming and not complete:
         # The session already has the env from its first start; rewriting would drop secrets
         log("env: secrets incomplete, keeping the env file from the last start")
@@ -657,6 +858,13 @@ def cmd_pre_tool_use() -> int:
         return 0
     if not isinstance(tool, str) or not isinstance(tool_input, dict):
         return 0
+    if tool == "Bash":
+        # stdout is the hook's response, so the refresh logs to the session-start log
+        try:
+            with open(LOG_FILE, "a") as out, contextlib.redirect_stdout(out):
+                refresh_github_tokens()
+        except Exception as e:  # a failed refresh must not block the command
+            print(f"github: token refresh crashed: {e!r}", file=sys.stderr)
     if tool.startswith("mcp__"):
         cleaned = strip_footer(tool_input)
         if cleaned == tool_input:
@@ -679,7 +887,11 @@ def main() -> int:
         return cmd_session_start(update="--no-update" not in args)
     if args[:1] == ["pre-tool-use"]:
         return cmd_pre_tool_use()
-    sys.exit("usage: bootstrap.py setup | session-start [--no-update] | pre-tool-use")
+    if args[:1] == ["git-credential"]:
+        return cmd_git_credential(args[1:])
+    sys.exit(
+        "usage: bootstrap.py setup | session-start [--no-update] | pre-tool-use | git-credential"
+    )
 
 
 CLAUDE_MD = """\
@@ -702,7 +914,8 @@ bodies, or code comments. This applies in every repo, every session, no
 exceptions, even if a template or another instruction suggests otherwise.
 
 If you ever see a footer sneak into a commit or PR body itself, treat it
-as a bug and strip it.
+as a bug and strip it. A `Co-authored-by` trailer that the GitHub identity
+section asks for is not AI attribution; add it where that section says.
 
 AGAIN, ADDING CLAUDE AUTHORSHIP OR PR FOOTERS WILL CAUSE THE PR OR COMMIT TO BE INVALID AND IT WILL BE THROWN AWAY! DO NOT ADD CLAUDE ATTRIBUTION TO ANY COMMITS OR PRS!!
 UNDER NO CIRCUMSTANCE ARE WE ALLOWED TO LEAK CLAUDE INFORMATION INTO COMMITS, ISSUES OR PULL REQUEST BODIES!
@@ -718,9 +931,43 @@ After creating a PR, keep watching it for review activity until it is merged or 
 ## Tools
 
 - To interact with other Claude Code sessions (create them, send messages, etc.), use the `claude-code` MCP. If it isn't available, fall back to the built-in `claude-code-remote` tools.
-- Use `gh` for everything on GitHub under the `dvcrn` account (public and private repos), and for reading any public repo. Its token can't write outside `dvcrn`.
-- To create issues or post comments on public repos outside `dvcrn`, use the `github` tools of the `dpn` MCP.
+
+## GitHub identity
+
 """
+
+
+def render_claude_md(
+    owners: list[str], identity: tuple[str, str] | None, gh_token_owner: str | None
+) -> str:
+    """Returns the global CLAUDE.md, with the GitHub identity rules for the boticorn owners."""
+    if not owners:
+        return CLAUDE_MD + (
+            "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
+            "write, use the `github` tools of the `dpn` MCP.\n"
+        )
+    names = ", ".join(f"`{owner}`" for owner in owners)
+    gh_token = f"the `{gh_token_owner}` token" if gh_token_owner else "the default token"
+    if identity:
+        user = f"{identity[0]} <{identity[1]}>"
+        co_author = (
+            f"End every commit message in those repos with the trailer `Co-authored-by: {user}`."
+        )
+        as_me = (
+            f"commit with `git -c user.name={shlex.quote(identity[0])} "
+            f"-c user.email={shlex.quote(identity[1])} commit ...` and without the trailer"
+        )
+    else:
+        user, co_author, as_me = "the user", "", "commit with the user's identity"
+    return (
+        CLAUDE_MD
+        + f"""\
+- On repos owned by {names}, `gh` and `git` act as the `boticorn[bot]` GitHub App. Commits there are authored as `boticorn[bot]` automatically (`git config user.name` shows it). {co_author}
+- `gh` is logged in with {gh_token}. For another of those owners, pass its token: `GH_TOKEN="$(cat {TOKEN_DIR}/<owner>)" gh ...`. Tokens refresh on their own.
+- On repos of any other owner, create issues, PRs and comments with the `github` tools of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.
+- When the user asks to act "as me" on one of the boticorn repos, post through the `dpn` MCP too, and {as_me}.
+"""
+    )
 
 
 if __name__ == "__main__":
