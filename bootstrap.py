@@ -94,8 +94,8 @@ GITHUB_OWNER = re.compile(r"[a-z0-9][a-z0-9-]*")
 BOTICORN_GITCONFIG = HOME / ".config" / "git" / "boticorn"
 BOTICORN_NAME = "boticorn[bot]"
 BOTICORN_EMAIL = "323198915+boticorn[bot]@users.noreply.github.com"
-# Kept out of the session env: git identity variables override the per-owner identity in git
-# config, and gh prefers token variables over its login, which the refresh keeps current
+# Kept out of the secrets exported to the session: git identity variables override the per-owner
+# identity in git config, and use_github_directly decides whether to export a GitHub token
 SESSION_ENV_EXCLUDED = {
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
     "GITHUB_TOKEN", "GH_TOKEN", "BOTICORN_TOKENS",
@@ -547,8 +547,11 @@ def write_token(name: str, token: str) -> None:
     os.replace(tmp, TOKEN_DIR / name)
 
 
-def install_github_tokens(tokens: dict[str, str], default: str | None) -> None:
-    """Writes the token files and logs gh in with the token for the session repo's owner.
+def install_github_tokens(
+    tokens: dict[str, str], default: str | None, login_timeout: float
+) -> bool:
+    """Writes the token files and logs gh in with the token for the session repo's owner, or the
+    default token. Returns whether gh is logged in.
 
     Tokens of owners missing from tokens are kept: they still work until they expire.
     """
@@ -564,23 +567,24 @@ def install_github_tokens(tokens: dict[str, str], default: str | None) -> None:
     owner = repo_owner()
     token = tokens.get(owner or "") or default
     if not token:
-        return
+        return False
     env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
     env["PATH"] = f"{TOOLS_PATH}:{env.get('PATH', '')}"
     cmd = ["gh", "auth", "login", "--with-token", "--insecure-storage", "--hostname", "github.com"]
     try:
         result = subprocess.run(
-            cmd, input=token, env=env, capture_output=True, text=True, timeout=3
+            cmd, input=token, env=env, capture_output=True, text=True, timeout=login_timeout
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"github: gh auth login failed ({e})")
-        return
+        return False
     if result.returncode != 0:
         log(f"github: gh auth login failed: {result.stderr.strip()}")
-        return
+        return False
     log(
         f"github: gh uses the {'boticorn token for ' + owner if owner in tokens else 'default token'}"
     )
+    return True
 
 
 def bypass_proxy_for_github() -> None:
@@ -590,13 +594,15 @@ def bypass_proxy_for_github() -> None:
 
 # The agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos.
 # Sending GitHub traffic direct lets gh, git and mise reach any repo. git picks the token file
-# by the repo's owner, and gh uses the session repo owner's token. Returns the env file lines.
+# by the repo's owner, and gh uses its login, falling back to the exported default token when the
+# login fails. Returns the env file lines.
 def use_github_directly(tokens: dict[str, str], default: str | None) -> list[str]:
     if not tokens and not default:
         log("github: no GitHub token, leaving GitHub traffic on the agent proxy")
         return []
     bypass_proxy_for_github()
-    install_github_tokens(tokens, default)
+    # The first gh call can make mise install gh, and session start isn't time sensitive
+    logged_in = install_github_tokens(tokens, default, login_timeout=60)
     # The empty helper drops ones configured earlier
     key = "credential.https://github.com.helper"
     subprocess.run(["git", "config", "--global", "--unset-all", key], capture_output=True)
@@ -605,10 +611,20 @@ def use_github_directly(tokens: dict[str, str], default: str | None) -> list[str
     run(
         ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"], "[git] "
     )
-    return [
+    lines = [
         f'export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}{GITHUB_HOSTS}"',
         f'export no_proxy="${{no_proxy:+$no_proxy,}}{GITHUB_HOSTS}"',
-        "unset GH_TOKEN GITHUB_TOKEN",
+    ]
+    if logged_in:
+        # gh prefers these over its login, which the refresh keeps current
+        return [*lines, "unset GH_TOKEN GITHUB_TOKEN"]
+    if not default:
+        return lines
+    # Without a login the token can't be refreshed, so a boticorn one stops working after an hour
+    return [
+        *lines,
+        f"export GITHUB_TOKEN={shlex.quote(default)}",
+        'export GH_TOKEN="$GITHUB_TOKEN"',
     ]
 
 
@@ -638,7 +654,10 @@ def refresh_github_tokens() -> None:
             log("github: token refresh failed, keeping the current tokens")
             return
         bypass_proxy_for_github()
-        install_github_tokens(tokens, env.get("GITHUB_TOKEN"))
+        # The hook's 10s timeout bounds the broker call and the login together
+        if not install_github_tokens(tokens, env.get("GITHUB_TOKEN"), login_timeout=3):
+            # gh still holds the old token, so try again before it expires
+            os.utime(TOKEN_STAMP, (retry_at, retry_at))
         log(f"github: refreshed tokens for {' '.join(sorted(tokens))}")
 
 
