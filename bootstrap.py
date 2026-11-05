@@ -51,6 +51,7 @@ GLOBAL_TOOLS = """\
 [tools]
 "aqua:1password/cli" = "2.41.1"
 "aqua:tailscale/tailscale" = "1.104.2"
+"npm:@schpet/linear-cli" = "3.1.0"
 age = "1.3.2"
 fnox = "1.42.0"
 gh = "2.103.0"
@@ -134,6 +135,9 @@ PROXIED_GITHUB_WRITES = tuple(
         "update_pull_request",
     )
 )
+
+# Linear goes through the linear CLI, which the agent proxy authenticates as the bot
+DENIED_LINEAR_MCP = ("mcp__Linear", "mcp__dpn__linear_*")
 
 ALLOWED_COMMANDS = (
     "Bash(op:*)",
@@ -258,7 +262,7 @@ def write_claude_settings() -> None:
     allow = permissions.setdefault("allow", [])
     allow += [rule for rule in ALLOWED_COMMANDS if rule not in allow]
     deny = permissions.setdefault("deny", [])
-    deny += [rule for rule in PROXIED_GITHUB_WRITES if rule not in deny]
+    deny += [rule for rule in (*PROXIED_GITHUB_WRITES, *DENIED_LINEAR_MCP) if rule not in deny]
 
     auto_allow = settings.setdefault("autoMode", {}).setdefault("allow", [])
     auto_allow += [rule for rule in ("$defaults", AUTO_MODE_ALLOW) if rule not in auto_allow]
