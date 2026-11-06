@@ -146,6 +146,7 @@ ALLOWED_COMMANDS = (
     "Bash(gh pr diff:*)",
     "Bash(gh pr checks:*)",
     "Bash(gh pr comment:*)",
+    "mcp__claude-code-remote__*",
 )
 # The default External System Writes rule excludes thread replies and resolves, so
 # addressing review feedback through gh api gets blocked in auto mode
