@@ -802,7 +802,14 @@ def join_tailscale(authkey: str | None) -> None:
         start_tailscaled(prefix)
     session = os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "unknown").removeprefix("cse_")
     hostname = "claude-" + session.lower().replace("_", "-")
-    up = ["tailscale", "up", f"--auth-key={authkey}", f"--hostname={hostname}", "--timeout=60s"]
+    up = [
+        "tailscale",
+        "up",
+        f"--auth-key={authkey}",
+        f"--hostname={hostname}",
+        "--ssh",
+        "--timeout=60s",
+    ]
     if run(up, prefix):
         run(["tailscale", "status", "--peers=false"], prefix)
         TAILSCALE_MARKER.touch()
