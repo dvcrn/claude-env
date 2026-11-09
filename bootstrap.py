@@ -208,7 +208,9 @@ def run(cmd: list[str], prefix: str = "", cwd: str | None = None) -> bool:
 
 
 def download(url: str, dest: Path, timeout: float = 60) -> None:
-    with urllib.request.urlopen(url, timeout=timeout) as resp, open(dest, "wb") as f:
+    # Cloudflare (in front of mise.jdx.dev) rejects urllib's default User-Agent with 403
+    request = urllib.request.Request(url, headers={"User-Agent": "claude-env-bootstrap"})
+    with urllib.request.urlopen(request, timeout=timeout) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
 
 
@@ -218,7 +220,21 @@ def download(url: str, dest: Path, timeout: float = 60) -> None:
 def install_mise(work: Path, arch: str) -> None:
     name = f"mise-v{MISE_VERSION}-linux-{'x64' if arch == 'x86_64' else 'arm64'}.tar.gz"
     tarball = work / name
-    download(f"https://github.com/jdx/mise/releases/download/v{MISE_VERSION}/{name}", tarball)
+    # mise.jdx.dev mirrors the GitHub release and stays up when GitHub 504s anonymous downloads
+    urls = [
+        f"https://mise.jdx.dev/v{MISE_VERSION}/{name}",
+        f"https://github.com/jdx/mise/releases/download/v{MISE_VERSION}/{name}",
+    ]
+    for attempt in range(3):
+        url = urls[attempt % len(urls)]
+        try:
+            download(url, tarball)
+            break
+        except OSError as e:
+            log(f"mise: {url} failed ({e})")
+            if attempt == 2:
+                raise
+            time.sleep(5)
     with tarfile.open(tarball) as tar:
         tar.extract("mise/bin/mise", work, filter="data")
     dest = HOME / ".local" / "bin" / "mise"
