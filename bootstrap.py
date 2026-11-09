@@ -48,7 +48,7 @@ from typing import NamedTuple
 VERSION = 1
 
 BASE_URL = "https://raw.githubusercontent.com/dvcrn/claude-env/main"
-BROKER_URL = os.environ.get("CLOUD_ENV_BROKER_URL", "https://cloud-env-broker.d.pn")
+BROKER_URL = os.environ.get("CLOUD_ENV_BROKER_URL", "https://grant.d.pn")
 SIGNING_NAMESPACE = "claude-env"
 
 MISE_VERSION = "2026.10.17"
