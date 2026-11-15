@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 # Raise to stop older signed copies from running. Installed copies only ever move forward.
-VERSION = 1
+VERSION = 2
 
 BASE_URL = "https://raw.githubusercontent.com/dvcrn/claude-env/main"
 BROKER_URL = os.environ.get("CLOUD_ENV_BROKER_URL", "https://broker.d.pn")
@@ -64,8 +64,11 @@ trzsz-ssh = "0.1.26"
 """
 
 HOME = Path.home()
+ANTIGRAVITY = os.environ.get("ANTIGRAVITY_AGENT") == "1" or HOME.name == "antigravity"
 CLAUDE_DIR = HOME / ".claude"
-INSTALL_DIR = CLAUDE_DIR / "hooks" / "claude-env"
+INSTALL_DIR = (
+    HOME / ".local" / "share" / "cloud-env" if ANTIGRAVITY else CLAUDE_DIR / "hooks" / "claude-env"
+)
 SCRIPT = INSTALL_DIR / "bootstrap.py"
 ALLOWED_SIGNERS = INSTALL_DIR / "allowed_signers"
 TOOLS_PATH = f"{HOME}/.local/bin:{HOME}/.local/share/mise/shims"
@@ -74,6 +77,10 @@ LOG_FILE = Path("/tmp/session-start.log")
 TAILSCALED_LOG = Path("/tmp/tailscaled.log")
 TAILSCALED_SOCKET = Path("/var/run/tailscale/tailscaled.sock")
 INIT_MARKER = Path("/dev/shm/.cloud-env-initialized")
+ATTEMPT_MARKER = Path("/dev/shm/.cloud-env-attempted")
+SESSION_LOCK = Path("/dev/shm/.cloud-env-session.lock")
+ANTIGRAVITY_ENV_FILE = Path("/dev/shm/cloud-env-session.sh")
+BROKER_TOKEN_FILE = HOME / ".gemini" / ".broker" / "token"
 TAILSCALE_MARKER = Path("/dev/shm/.cloud-env-tailscale")
 INGRESS_TOKEN_FILE = Path(
     os.environ.get(
@@ -117,7 +124,7 @@ ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 # Never taken from the broker or 1Password: they would change how this script or the shell runs
 RESERVED_NAMES = {
     "PATH", "HOME", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH",
-    "CLAUDE_ENV_FILE", "CLAUDE_PROJECT_DIR",
+    "CLAUDE_ENV_FILE", "CLAUDE_PROJECT_DIR", "GITHUB_TOKEN_FILE",
 }  # fmt: skip
 # Passed through to op, which needs the agent proxy to reach 1Password
 OP_PASSTHROUGH = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE")
@@ -218,6 +225,11 @@ def download(url: str, dest: Path, timeout: float = 60) -> None:
 
 
 def install_mise(work: Path, arch: str) -> None:
+    dest = HOME / ".local" / "bin" / "mise"
+    if dest.is_file():
+        current = subprocess.run([str(dest), "--version"], capture_output=True, text=True)
+        if current.returncode == 0 and MISE_VERSION in current.stdout:
+            return
     name = f"mise-v{MISE_VERSION}-linux-{'x64' if arch == 'x86_64' else 'arm64'}.tar.gz"
     tarball = work / name
     # mise.jdx.dev mirrors the GitHub release and stays up when GitHub 504s anonymous downloads
@@ -235,13 +247,14 @@ def install_mise(work: Path, arch: str) -> None:
             if attempt == 2:
                 raise
             time.sleep(5)
-    with tarfile.open(tarball) as tar:
-        tar.extract("mise/bin/mise", work, filter="data")
-    dest = HOME / ".local" / "bin" / "mise"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(work / "mise/bin/mise", dest)
+    with tarfile.open(tarball) as tar, open(dest, "wb") as out:
+        member = tar.extractfile("mise/bin/mise")
+        assert member is not None
+        shutil.copyfileobj(member, out)
     dest.chmod(0o755)
-    Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{TOOLS_PATH}:$PATH"\n')
+    if os.access("/etc/profile.d", os.W_OK):
+        Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{TOOLS_PATH}:$PATH"\n')
 
 
 def install_global_tools() -> None:
@@ -261,6 +274,35 @@ def install_self(signer: str) -> None:
 
 def hook_command(subcommand: str) -> str:
     return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} {subcommand}"
+
+
+def replace_marked_block(existing: str, lines: list[str]) -> str:
+    kept = re.sub(r"(?ms)^# >>> cloud-env\n.*?^# <<< cloud-env(\n|\Z)", "", existing)
+    if kept and not kept.endswith("\n"):
+        kept += "\n"
+    return kept + "\n".join(["# >>> cloud-env", *lines, "# <<< cloud-env"]) + "\n"
+
+
+# Antigravity runs every command in a non-interactive bash shell with BASH_ENV=~/.bashrc
+def write_antigravity_bashrc() -> None:
+    path = HOME / ".bashrc"
+    existing = path.read_text() if path.exists() else ""
+    # Debian's default non-interactive early return would stop BASH_ENV before our block
+    existing = re.sub(r"(?ms)^case \$- in\n.*?^esac\n?", "", existing)
+    attempted = shlex.quote(str(ATTEMPT_MARKER))
+    env_file = shlex.quote(str(ANTIGRAVITY_ENV_FILE))
+    lines = [
+        f'case ":$PATH:" in *":{TOOLS_PATH}:"*) ;; *) export PATH="{TOOLS_PATH}:$PATH" ;; esac',
+        f'if [ -z "${{_CLOUD_ENV_RUNNING:-}}" ] && [ ! -e {attempted} ]; then',
+        f"  _CLOUD_ENV_RUNNING=1 {hook_command('session-start')}",
+        "fi",
+        # Subshells inherit the loaded env; re-sourcing would clobber per-command overrides
+        f'if [ -z "${{_CLOUD_ENV_LOADED:-}}" ] && [ -r {env_file} ]; then',
+        "  export _CLOUD_ENV_LOADED=1",
+        f"  . {env_file}",
+        "fi",
+    ]
+    path.write_text(replace_marked_block(existing, lines))
 
 
 def set_hook(hooks: dict, event: str, group: dict) -> None:
@@ -318,13 +360,16 @@ def cmd_setup() -> int:
         sys.exit(f"bootstrap: unsupported architecture {arch}")
 
     os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ['PATH']}"
-    CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         install_mise(Path(tmp), arch)
     install_global_tools()
     install_self(signer)
-    write_claude_settings()
-    (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md({}, None))
+    if ANTIGRAVITY:
+        write_antigravity_bashrc()
+    else:
+        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+        write_claude_settings()
+        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md({}, None))
     print(f"bootstrap: version {VERSION} complete")
     return 0
 
@@ -404,11 +449,42 @@ def ingress_sig_sample() -> str | None:
     return f"{kid}.{digest}.{signature}"
 
 
+def broker_token_headers() -> dict[str, str]:
+    """Reads Cloudflare Access service-token headers when the VM has no proxy network secret."""
+    if not BROKER_TOKEN_FILE.is_file():
+        return {}
+    try:
+        raw = json.loads(BROKER_TOKEN_FILE.read_text())
+    except (OSError, ValueError):
+        log(f"broker: unreadable token file {BROKER_TOKEN_FILE}")
+        return {}
+    if not isinstance(raw, dict):
+        log(f"broker: {BROKER_TOKEN_FILE} is not a JSON object")
+        return {}
+    client_id = raw.get("CF-Access-Client-Id")
+    client_secret = raw.get("CF-Access-Client-Secret")
+    if not (
+        isinstance(client_id, str)
+        and isinstance(client_secret, str)
+        and clean_text(client_id)
+        and clean_text(client_secret)
+    ):
+        log(
+            f"broker: missing CF-Access-Client-Id or CF-Access-Client-Secret in {BROKER_TOKEN_FILE}"
+        )
+        return {}
+    return {"CF-Access-Client-Id": client_id, "CF-Access-Client-Secret": client_secret}
+
+
 def fetch_broker_env(timeout: float = 20) -> dict[str, str] | None:
+    session_id = os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID") or os.environ.get(
+        "ANTIGRAVITY_CONVERSATION_ID", ""
+    )
     headers = {
         # Cloudflare's Browser Integrity Check rejects urllib's default User-Agent (error 1010)
         "User-Agent": f"claude-env-bootstrap/{VERSION}",
-        "X-Session-Id": os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", ""),
+        "X-Session-Id": session_id,
+        **broker_token_headers(),
     }
     if sample := ingress_sig_sample():
         headers["X-Ingress-Sig-Sample"] = sample
@@ -638,14 +714,16 @@ def install_gh_shim() -> None:
     os.replace(tmp, GH_SHIM)
 
 
-# The agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos.
-# Sending GitHub traffic direct lets gh, git and mise reach any repo. git's credential helper and
-# the gh shim pick the token by the repo's owner. Returns the env file lines.
+# Claude Code's agent proxy swaps GitHub credentials for a placeholder and only allows the session's
+# repos, so traffic goes direct there. Antigravity's proxy only swaps agy-h-* handles and blocks
+# direct egress, so GitHub stays on HTTPS_PROXY while git's credential helper and the gh shim pick
+# the token by the repo's owner. Returns the env file lines.
 def use_github_directly(apps: dict[str, GitHubApp], default: str | None) -> list[str]:
     if not apps and not default:
         log("github: no GitHub token, leaving GitHub traffic on the agent proxy")
         return []
-    bypass_proxy_for_github()
+    if not ANTIGRAVITY:
+        bypass_proxy_for_github()
     store_github_tokens(apps, default)
     install_gh_shim()
     # The empty helper drops ones configured earlier
@@ -657,12 +735,15 @@ def use_github_directly(apps: dict[str, GitHubApp], default: str | None) -> list
         ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"], "[git] "
     )
     log(f"github: app tokens for {' '.join(sorted(apps)) or 'no owners'}")
-    return [
-        f'export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}{GITHUB_HOSTS}"',
-        f'export no_proxy="${{no_proxy:+$no_proxy,}}{GITHUB_HOSTS}"',
-        # gh prefers these over the token the shim passes
-        "unset GH_TOKEN GITHUB_TOKEN",
-    ]
+    lines = []
+    if not ANTIGRAVITY:
+        lines += [
+            f'export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}{GITHUB_HOSTS}"',
+            f'export no_proxy="${{no_proxy:+$no_proxy,}}{GITHUB_HOSTS}"',
+        ]
+    # gh prefers these over the token the shim passes
+    lines.append("unset GH_TOKEN GITHUB_TOKEN")
+    return lines
 
 
 def refresh_github_tokens() -> None:
@@ -758,18 +839,22 @@ def cmd_gh(args: list[str]) -> int:
 
 
 def write_env_block(lines: list[str]) -> bool:
-    """Replaces this script's marked block in $CLAUDE_ENV_FILE."""
+    """Writes the session env: to /dev/shm on Antigravity, or a marked block in $CLAUDE_ENV_FILE."""
+    if ANTIGRAVITY:
+        tmp = ANTIGRAVITY_ENV_FILE.with_name(f".{ANTIGRAVITY_ENV_FILE.name}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, ANTIGRAVITY_ENV_FILE)
+        return True
     if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
         log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
         return False
     path = Path(env_file)
     existing = path.read_text() if path.exists() else ""
-    kept = re.sub(r"(?ms)^# >>> cloud-env\n.*?^# <<< cloud-env(\n|\Z)", "", existing)
-    if kept and not kept.endswith("\n"):
-        kept += "\n"
     path.touch(mode=0o600)
     path.chmod(0o600)  # before writing, so secrets never sit in a readable file
-    path.write_text(kept + "\n".join(["# >>> cloud-env", *lines, "# <<< cloud-env"]) + "\n")
+    path.write_text(replace_marked_block(existing, lines))
     return True
 
 
@@ -808,6 +893,10 @@ def start_tailscaled(prefix: str) -> None:
 
 def join_tailscale(authkey: str | None) -> None:
     prefix = "[tailscale] "
+    # Antigravity's sandbox netns only exposes lo, so tailscaled's netmon pauses control login
+    if ANTIGRAVITY:
+        log("unsupported in Antigravity sandbox, skipping", prefix)
+        return
     if not shutil.which("tailscaled"):
         log("not installed, skipping", prefix)
         return
@@ -831,23 +920,30 @@ def join_tailscale(authkey: str | None) -> None:
         TAILSCALE_MARKER.touch()
 
 
-def repo_mise_project() -> str | None:
-    project = os.environ.get("CLAUDE_PROJECT_DIR")
-    if not project or not any((Path(project) / name).is_file() for name in REPO_MISE_CONFIGS):
-        return None
-    return project
+def repo_mise_projects() -> list[Path]:
+    if project := os.environ.get("CLAUDE_PROJECT_DIR"):
+        candidates = [Path(project)]
+    elif ANTIGRAVITY:
+        candidates = [
+            git_dir.parent for git_dir in sorted(HOME.glob("*/*/.git")) if git_dir.is_dir()
+        ]
+    else:
+        return []
+    return [
+        repo for repo in candidates if any((repo / name).is_file() for name in REPO_MISE_CONFIGS)
+    ]
 
 
 # The hook runs inside the repo, and every mise call there (including the op and tailscale
 # shims) fails until the repo's mise config is trusted, so this runs before anything else.
 def trust_repo() -> None:
-    if project := repo_mise_project():
-        run(["mise", "trust"], "[mise] ", cwd=project)
+    for project in repo_mise_projects():
+        run(["mise", "trust"], "[mise] ", cwd=str(project))
 
 
 def install_repo_tools() -> None:
-    if project := repo_mise_project():
-        run(["mise", "install", "--yes"], "[mise] ", cwd=project)
+    for project in repo_mise_projects():
+        run(["mise", "install", "--yes"], "[mise] ", cwd=str(project))
 
 
 # --- session-start --------------------------------------------------------------------------
@@ -859,10 +955,12 @@ def session_start(update: bool) -> None:
     1. On resume, stop unless Tailscale needs rejoining: the VM kept everything else.
     2. Update to the newest signed copy of this script.
     3. Load secrets from the broker and 1Password.
-    4. Configure git and GitHub, and write the session env to $CLAUDE_ENV_FILE.
+    4. Configure git and GitHub, and write the session env.
     5. Join Tailscale and install the repo's mise tools in parallel.
     """
     log("== session-start")
+    # Child processes must not trigger ~/.bashrc's session-start check on Antigravity
+    os.environ.pop("BASH_ENV", None)
     os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ.get('PATH', '')}"
     trust_repo()
 
@@ -886,11 +984,11 @@ def session_start(update: bool) -> None:
 
     set_git_identity(apps)
     identity = (os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL"))
-    if apps or not resuming:
+    if not ANTIGRAVITY and (apps or not resuming):
         (CLAUDE_DIR / "CLAUDE.md").write_text(
             render_claude_md(apps, identity if all(identity) else None)
         )
-    lines = [f'export PATH="{TOOLS_PATH}:$PATH"']
+    lines = [] if ANTIGRAVITY else [f'export PATH="{TOOLS_PATH}:$PATH"']
     lines += [
         f"export {name}={shlex.quote(value)}"
         for name, value in secrets.items()
@@ -918,7 +1016,15 @@ def cmd_session_start(update: bool) -> int:
     os.dup2(fd, 2)
     os.close(fd)
     try:
-        session_start(update)
+        if ANTIGRAVITY:
+            with open(SESSION_LOCK, "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    session_start(update)
+                finally:
+                    ATTEMPT_MARKER.touch()
+        else:
+            session_start(update)
     except Exception as e:  # the session must start even if this script breaks
         log(f"session-start failed: {e!r}")
     return 0

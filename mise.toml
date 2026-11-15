@@ -3,12 +3,12 @@ ruff = "0.17.1"
 shellcheck = "0.11.0"
 
 [tasks.lint]
-description = "Run ruff on bootstrap.py and shellcheck on stub.sh"
+description = "Run ruff on bootstrap.py and shellcheck on stub*.sh"
 run = [
   "ruff check bootstrap.py",
   "ruff format --check bootstrap.py",
-  "bash -n stub.sh",
-  "shellcheck -s bash stub.sh",
+  "bash -n stub.sh stub-agy.sh",
+  "shellcheck -s bash stub.sh stub-agy.sh",
 ]
 
 [tasks.sign]

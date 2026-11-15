@@ -1,14 +1,15 @@
 # claude-env
 
-A signed bootstrap for Claude Code cloud environments. Every environment runs the same setup
-stub, which verifies and runs `bootstrap.py` from this repo, so no environment's setup script
-holds secrets or needs editing when the bootstrap changes.
+A signed bootstrap for Claude Code and Antigravity cloud environments. Every environment runs the
+same setup stub, which verifies and runs `bootstrap.py` from this repo, so no environment's setup
+script holds secrets or needs editing when the bootstrap changes.
 
 | File                         | Runs                                         | Does                                                                                                                                                                                             |
 | ---------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `stub.sh`                    | as the environment's setup script            | Verifies `bootstrap.py` against `SIGNER` and runs `bootstrap.py setup`                                                                                                                           |
-| `bootstrap.py setup`         | once, at setup                               | Installs mise and the tools in `GLOBAL_TOOLS` (op, Tailscale, gh, ...), installs itself as the SessionStart hook, and writes `~/.claude/settings.json` and `~/.claude/CLAUDE.md`. No secrets     |
-| `bootstrap.py session-start` | on every session start and resume            | Updates itself to the newest signed copy, loads secrets from `https://cloud-env-broker.d.pn` and 1Password into the session env, and configures git, GitHub, Tailscale and the repo's mise tools |
+| `stub.sh`                    | as a Claude Code environment's setup script  | Verifies `bootstrap.py` against `SIGNER` and runs `bootstrap.py setup`                                                                                                                           |
+| `stub-agy.sh`                | as `/home/antigravity/env-setup.sh`          | Verifies `bootstrap.py` against `SIGNER`, runs `bootstrap.py setup`, and warms `bootstrap.py session-start --no-update`                                                                          |
+| `bootstrap.py setup`         | once, at setup                               | Installs mise and the tools in `GLOBAL_TOOLS` (op, Tailscale, gh, ...), installs itself, and wires `~/.claude/` (Claude Code) or `~/.bashrc` (Antigravity). No secrets                           |
+| `bootstrap.py session-start` | on every session start and resume            | Updates itself to the newest signed copy, loads secrets from `https://broker.d.pn` and 1Password into the session env, and configures git, GitHub, Tailscale and the repo's mise tools           |
 | `bootstrap.py pre-tool-use`  | before GitHub MCP, Bash and file-write calls | Strips the Claude Code footer from GitHub MCP input and denies Bash commands and file writes that contain it. Setup denies the proxied `mcp__github__` write tools, so posts go through `gh` |
 | `bootstrap.py git-credential` | from git, for github.com                    | Returns the GitHub App token of the remote's owner, or the default token. Re-mints the app tokens from the broker once they are 50 minutes old |
 | `bootstrap.py gh`            | from the `gh` shim in `~/.local/bin`         | Runs the real `gh` with the GitHub App token of the owner it acts on (`--repo`, a `gh api repos/<owner>/...` path, or the current directory's `origin`), or the default token. Re-mints like `git-credential` |
@@ -17,10 +18,17 @@ holds secrets or needs editing when the bootstrap changes.
 
 ## Setting up an environment
 
+**Claude Code**
+
 1. In the Claude Code environment settings, paste [`stub.sh`](stub.sh) as the setup script. Its
    `SIGNER` is the key in `signing_key.pub`.
-2. Give the environment a network secret for `cloud-env-broker.d.pn` carrying its broker
-   credentials.
+2. Give the environment a network secret for `broker.d.pn` carrying its broker credentials.
+
+**Antigravity**
+
+1. Put the environment's Cloudflare Access service-token JSON (`CF-Access-Client-Id` and
+   `CF-Access-Client-Secret`) in `~/.gemini/.broker/token`.
+2. Save [`stub-agy.sh`](stub-agy.sh) as `/home/antigravity/env-setup.sh`.
 
 Each session then gets, from the broker and the 1Password Environment it points to:
 
@@ -43,11 +51,13 @@ If the broker can't be reached, the session starts without secrets.
 
 - `/tmp/session-start.log` has the hook's output, including mise, Tailscale and token refreshes.
 - `/dev/shm/cloud-env-github/` has the GitHub tokens, one file per owner plus `_default`.
+- `/dev/shm/cloud-env-session.sh` has the exported session variables on Antigravity.
 - `/tmp/tailscaled.log` has the Tailscale daemon's output.
-- The installed hook lives in `~/.claude/hooks/claude-env/`. Run it by hand with
-  `python3 -I ~/.claude/hooks/claude-env/bootstrap.py session-start --no-update`.
+- The installed copy lives in `~/.claude/hooks/claude-env/` (Claude Code) or
+  `~/.local/share/cloud-env/` (Antigravity). Run it by hand with `session-start --no-update`.
 - A resumed session skips everything unless Tailscale went down. Delete
-  `/dev/shm/.cloud-env-initialized` to force a full run.
+  `/dev/shm/.cloud-env-initialized` (and `/dev/shm/.cloud-env-attempted` on Antigravity) to force a
+  full run.
 
 ## Changing the bootstrap
 
