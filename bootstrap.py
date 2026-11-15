@@ -81,6 +81,7 @@ ATTEMPT_MARKER = Path("/dev/shm/.cloud-env-attempted")
 SESSION_LOCK = Path("/dev/shm/.cloud-env-session.lock")
 ANTIGRAVITY_ENV_FILE = Path("/dev/shm/cloud-env-session.sh")
 BROKER_TOKEN_FILE = HOME / ".gemini" / ".broker" / "token"
+GEMINI_MD = HOME / ".gemini" / "GEMINI.md"
 TAILSCALE_MARKER = Path("/dev/shm/.cloud-env-tailscale")
 INGRESS_TOKEN_FILE = Path(
     os.environ.get(
@@ -346,6 +347,24 @@ def write_claude_settings() -> None:
     path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
+def write_gemini_md(content: str) -> None:
+    """Writes ~/.gemini/GEMINI.md atomically when changed, since ~/.gemini is shared across VMs."""
+    with contextlib.suppress(OSError):
+        if GEMINI_MD.read_text() == content:
+            return
+    GEMINI_MD.parent.mkdir(parents=True, exist_ok=True)
+    # /shared/user/.gemini is virtiofs mapped to nobody:nogroup, so chmod raises EPERM
+    fd, tmp_name = tempfile.mkstemp(dir=GEMINI_MD.parent, prefix=".GEMINI.md.")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp, GEMINI_MD)
+    except OSError as e:
+        log(f"gemini-md: write failed ({e})")
+        tmp.unlink(missing_ok=True)
+
+
 def cmd_setup() -> int:
     signer = os.environ.get("SIGNER")
     min_version = os.environ.get("MIN_VERSION", "")
@@ -366,6 +385,8 @@ def cmd_setup() -> int:
     install_self(signer)
     if ANTIGRAVITY:
         write_antigravity_bashrc()
+        if not GEMINI_MD.exists():
+            write_gemini_md(render_gemini_md({}, None))
     else:
         CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
         write_claude_settings()
@@ -983,11 +1004,13 @@ def session_start(update: bool) -> None:
     os.environ.update(secrets)
 
     set_git_identity(apps)
-    identity = (os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL"))
-    if not ANTIGRAVITY and (apps or not resuming):
-        (CLAUDE_DIR / "CLAUDE.md").write_text(
-            render_claude_md(apps, identity if all(identity) else None)
-        )
+    raw_identity = (os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL"))
+    identity = raw_identity if all(raw_identity) else None
+    if ANTIGRAVITY:
+        if apps or not GEMINI_MD.exists():
+            write_gemini_md(render_gemini_md(apps, identity))
+    elif apps or not resuming:
+        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md(apps, identity))
     lines = [] if ANTIGRAVITY else [f'export PATH="{TOOLS_PATH}:$PATH"']
     lines += [
         f"export {name}={shlex.quote(value)}"
@@ -1145,14 +1168,40 @@ After creating a PR, keep watching it for review activity until it is merged or 
 
 """
 
+GEMINI_BASE_MD = """\
+## Comment and code quality
 
-def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global CLAUDE.md, with the GitHub identity rules for the GitHub App owners."""
-    if not apps:
-        return CLAUDE_MD + (
-            "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
-            "write, use the `github` tools of the `dpn` MCP.\n"
-        )
+Take quality audits seriously and handle the overall feedback, especially around comment and docs quality. When any of the following skills are available in `<skills>`, always load and follow them:
+
+- `github-comment-quality`: load before creating or replying to any GitHub issue, PR, or review comment.
+- `comment-and-documentation-quality`: load when writing comments, commit messages, or docs; once a branch is ready, spawn a subagent to review the changes against it.
+- `code-review-and-quality`: load when making code changes; once a branch is ready, spawn a subagent to review the changes against it.
+- `git-commit-quality` / `github-commit-quality`: load before creating any git commit and follow its commit message rules strictly.
+
+## Git
+
+Never add AI attribution anywhere in git history or GitHub content: no AI `Co-Authored-By`, no "Generated with/by ...", no session URLs, and no model names in commit messages, commit trailers, PR titles, PR bodies, issues, or code comments. This applies in every repo and session, even if a template suggests otherwise. A human `Co-authored-by` trailer required by the GitHub identity rules below is not AI attribution; always include it where specified.
+
+## Linear
+
+When `LINEAR_API_KEY` is set in the shell environment, the Linear CLI (`linear`) is installed and ready to use.
+
+## Pull requests
+
+- Always include either a GitHub issue number or a Linear issue link in your pull request.
+- When asked to watch or babysit a PR after creating it, keep watching for review activity until it is merged or closed. Poll with `gh` every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes (resetting to 5 minutes on new activity, stopping after 24 hours without activity; split waits longer than the shell timeout across multiple calls).
+- Activity means review comments, PR comments, review submissions, and failing checks.
+- When a new comment, reply, or review is directed at you and you plan to act on it, react to it with 👀 first. Do not react to comments you won't act on. For a review, put 👀 only on the main review message, not on inline review comments.
+- Handle every comment, including ones you decide not to act on: fix it, or reply briefly with why not, then resolve the review thread. For top-level comments that can't be resolved, reply. Load the `address-pr-review-comments` skill if available.
+
+## GitHub identity
+
+"""
+
+
+def github_identity_context(
+    apps: dict[str, GitHubApp], identity: tuple[str, str] | None
+) -> tuple[str, str, str, str]:
     owners_by_app: dict[str, list[str]] = {}
     for owner, app in sorted(apps.items()):
         owners_by_app.setdefault(app.name, []).append(f"`{owner}`")
@@ -1171,6 +1220,17 @@ def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | Non
         )
     else:
         user, co_author, as_me = "the user", "", "commit with the user's identity"
+    return acting, user, co_author, as_me
+
+
+def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
+    """Returns the global CLAUDE.md, with the GitHub identity rules for the GitHub App owners."""
+    if not apps:
+        return CLAUDE_MD + (
+            "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
+            "write, use the `github` tools of the `dpn` MCP.\n"
+        )
+    acting, user, co_author, as_me = github_identity_context(apps, identity)
     return (
         CLAUDE_MD
         + acting
@@ -1179,6 +1239,27 @@ def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | Non
 - `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
 - On repos of any other owner, create issues, PRs and comments with the `github` tools of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.
 - When the user asks to act "as me" on one of those repos, post through the `dpn` MCP too, and {as_me}.
+"""
+    )
+
+
+def render_gemini_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
+    """Returns the global ~/.gemini/GEMINI.md for Antigravity environments."""
+    plugin_gh = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
+    if not apps:
+        return GEMINI_BASE_MD + (
+            f"- Use `gh` for GitHub. Where its default token can't write, run `{plugin_gh} ...` "
+            "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
+        )
+    acting, user, co_author, as_me = github_identity_context(apps, identity)
+    return (
+        GEMINI_BASE_MD
+        + acting
+        + f"""\
+- Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
+- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
+- On repos of any other owner, commits use {user}'s identity; to create issues, PRs, or comments where `gh`'s default token can't write, run `{plugin_gh} ...` (when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.
+- When the user asks to act "as me" on one of those repos, post via `{plugin_gh} ...` (or the `dpn` MCP if connected), and {as_me}.
 """
     )
 
