@@ -24,7 +24,7 @@ script holds secrets or needs editing when the bootstrap changes.
    `SIGNER` is the key in `signing_key.pub`.
 2. Give the environment a network secret for `broker.d.pn` carrying its broker credentials.
 
-**Antigravity**
+**Antigravity** (see [`docs/antigravity-learnings.md`](docs/antigravity-learnings.md))
 
 1. Put the environment's Cloudflare Access service-token JSON (`CF-Access-Client-Id` and
    `CF-Access-Client-Secret`) in `~/.gemini/.broker/token`.
