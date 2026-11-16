@@ -3,13 +3,17 @@ ruff = "0.17.1"
 shellcheck = "0.11.0"
 
 [tasks.lint]
-description = "Run ruff on bootstrap.py and shellcheck on stub*.sh"
+description = "Run ruff on bootstrap.py and tests, and shellcheck on stub*.sh"
 run = [
-  "ruff check bootstrap.py",
-  "ruff format --check bootstrap.py",
+  "ruff check bootstrap.py tests",
+  "ruff format --check bootstrap.py tests",
   "bash -n stub.sh stub-agy.sh",
   "shellcheck -s bash stub.sh stub-agy.sh",
 ]
+
+[tasks.test]
+description = "Run the unit tests"
+run = "python3 -B -m unittest discover -s tests"
 
 [tasks.sign]
 description = "Sign bootstrap.py with CLAUDE_ENV_SIGNING_KEY from fnox, then run check"
@@ -25,8 +29,8 @@ mise run check
 '''
 
 [tasks.check]
-description = "Lint, then confirm bootstrap.py.sig matches bootstrap.py and signing_key.pub"
-depends = ["lint"]
+description = "Lint, test, then confirm bootstrap.py.sig matches bootstrap.py and signing_key.pub"
+depends = ["lint", "test"]
 shell = "bash -c"
 run = '''
 set -euo pipefail
@@ -38,8 +42,8 @@ ssh-keygen -Y verify -f "$signers" -I claude-env -n claude-env -s bootstrap.py.s
 '''
 
 [tasks.precommit]
-description = "Lint, then confirm the staged bootstrap.py.sig matches the staged bootstrap.py"
-depends = ["lint"]
+description = "Lint, test, then confirm the staged bootstrap.py.sig matches the staged bootstrap.py"
+depends = ["lint", "test"]
 shell = "bash -c"
 run = '''
 set -euo pipefail

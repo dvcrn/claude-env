@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
@@ -50,18 +51,6 @@ VERSION = 2
 BASE_URL = "https://raw.githubusercontent.com/dvcrn/claude-env/main"
 BROKER_URL = os.environ.get("CLOUD_ENV_BROKER_URL", "https://broker.d.pn")
 SIGNING_NAMESPACE = "claude-env"
-
-MISE_VERSION = "2026.10.17"
-GLOBAL_TOOLS = """\
-[tools]
-"aqua:1password/cli" = "2.41.1"
-"aqua:tailscale/tailscale" = "1.104.2"
-"npm:@schpet/linear-cli" = "3.1.0"
-age = "1.3.2"
-fnox = "1.42.0"
-gh = "2.103.0"
-trzsz-ssh = "0.1.26"
-"""
 
 HOME = Path.home()
 ANTIGRAVITY = os.environ.get("ANTIGRAVITY_AGENT") == "1" or HOME.name == "antigravity"
@@ -74,112 +63,7 @@ ALLOWED_SIGNERS = INSTALL_DIR / "allowed_signers"
 TOOLS_PATH = f"{HOME}/.local/bin:{HOME}/.local/share/mise/shims"
 
 LOG_FILE = Path("/tmp/session-start.log")
-TAILSCALED_LOG = Path("/tmp/tailscaled.log")
-TAILSCALED_SOCKET = Path("/var/run/tailscale/tailscaled.sock")
 INIT_MARKER = Path("/dev/shm/.cloud-env-initialized")
-ATTEMPT_MARKER = Path("/dev/shm/.cloud-env-attempted")
-SESSION_LOCK = Path("/dev/shm/.cloud-env-session.lock")
-ANTIGRAVITY_ENV_FILE = Path("/dev/shm/cloud-env-session.sh")
-BROKER_TOKEN_FILE = HOME / ".gemini" / ".broker" / "token"
-GEMINI_MD = HOME / ".gemini" / "GEMINI.md"
-TAILSCALE_MARKER = Path("/dev/shm/.cloud-env-tailscale")
-INGRESS_TOKEN_FILE = Path(
-    os.environ.get(
-        "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
-        "/home/claude/.claude/remote/.session_ingress_token",
-    )
-)
-GITHUB_HOSTS = (
-    "api.github.com,github.com,codeload.github.com,objects.githubusercontent.com,"
-    "raw.githubusercontent.com,uploads.github.com"
-)
-REPO_MISE_CONFIGS = ("mise.toml", ".mise.toml", ".config/mise.toml", ".tool-versions")
-
-# One file per owner with that owner's GitHub App token. Underscore names can't clash with
-# owners: `_default` serves other owners, `_stamp` times the next refresh, `_lock` guards it.
-TOKEN_DIR = Path("/dev/shm/cloud-env-github")
-DEFAULT_TOKEN = "_default"
-TOKEN_STAMP = TOKEN_DIR / "_stamp"
-TOKEN_LOCK = TOKEN_DIR / "_lock"
-# Installation tokens expire after an hour
-TOKEN_REFRESH_AFTER = 50 * 60
-TOKEN_RETRY_AFTER = 5 * 60
-GITHUB_OWNER = re.compile(r"[a-z0-9][a-z0-9-]*")
-# One git config file per owner with the commit identity of that owner's GitHub App
-GIT_IDENTITY_DIR = HOME / ".config" / "git" / "github-apps"
-# Identity file of version 1 copies, whose includes session start drops
-LEGACY_IDENTITY_FILE = HOME / ".config" / "git" / "boticorn"
-# Identity for BOTICORN_TOKENS entries, which carry only a token
-BOTICORN_NAME = "boticorn[bot]"
-BOTICORN_EMAIL = "323198915+boticorn[bot]@users.noreply.github.com"
-# Ahead of the mise shim on TOOLS_PATH
-GH_SHIM = HOME / ".local" / "bin" / "gh"
-# Kept out of the secrets exported to the session: git identity variables override the per-owner
-# identity in git config, and gh and git get their GitHub tokens from this script
-SESSION_ENV_EXCLUDED = {
-    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
-    "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_APP_TOKENS", "BOTICORN_TOKENS",
-}  # fmt: skip
-
-ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
-# Never taken from the broker or 1Password: they would change how this script or the shell runs
-RESERVED_NAMES = {
-    "PATH", "HOME", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH",
-    "CLAUDE_ENV_FILE", "CLAUDE_PROJECT_DIR", "GITHUB_TOKEN_FILE",
-}  # fmt: skip
-# Passed through to op, which needs the agent proxy to reach 1Password
-OP_PASSTHROUGH = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE")
-OP_TIMEOUT = 30
-# TS_AUTHKEY only goes to `tailscale up`, never into the session env
-TAILSCALE_ONLY = "TS_AUTHKEY"
-
-# Claude Code footer on GitHub posts, including any --- separator above it
-FOOTER = re.compile(
-    r"\n*(?:-{3,}[ \t]*\n+)?(?:🤖 )?_?Generated (?:by|with) "
-    r"\[Claude Code\]\(https://claude\.(?:ai/code|com/claude-code)[^)]*\)_?[ \t]*"
-)
-PRE_TOOL_USE_MATCHER = r"^(Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*[Gg]it[Hh]ub.*)$"
-# The proxied GitHub MCP server appends the footer after this hook runs, so these tools are
-# denied and posts go through gh
-PROXIED_GITHUB_WRITES = tuple(
-    f"mcp__github__{name}"
-    for name in (
-        "add_comment_to_pending_review",
-        "add_issue_comment",
-        "add_reply_to_pull_request_comment",
-        "create_pull_request",
-        "issue_write",
-        "pull_request_review_write",
-        "update_issue_comment",
-        "update_pull_request",
-    )
-)
-
-# Linear goes through the linear CLI, which the agent proxy authenticates as the bot
-DENIED_LINEAR_MCP = ("mcp__Linear", "mcp__dpn__linear_*")
-
-ALLOWED_COMMANDS = (
-    "Bash(op:*)",
-    "Bash(jq:*)",
-    "Bash(gh pr view:*)",
-    "Bash(gh pr diff:*)",
-    "Bash(gh pr checks:*)",
-    "Bash(gh pr comment:*)",
-    "mcp__claude-code-remote__*",
-)
-# The default External System Writes rule excludes thread replies and resolves, so
-# addressing review feedback through gh api gets blocked in auto mode
-AUTO_MODE_ALLOW = (
-    "PR Review Thread Work: When the user's own message asked the agent to work on, babysit, "
-    "or address review feedback on a specific PR in the repository this session was started "
-    "for, these writes on that PR are allowed: replying to its review comments or threads "
-    "(`gh api` POST `repos/{o}/{r}/pulls/{n}/comments/{id}/replies`, GraphQL "
-    "`addPullRequestReviewThreadReply`), resolving or unresolving its review threads (GraphQL "
-    "`resolveReviewThread`/`unresolveReviewThread`), posting PR comments, editing comments the "
-    "agent posted in this session, and re-requesting review from existing reviewers. Does not "
-    "cover merging, closing, approving or requesting changes, label or base changes, or writes "
-    "to any other PR or repository."
-)
 
 _log_lock = threading.Lock()
 
@@ -207,10 +91,12 @@ def run(cmd: list[str], prefix: str = "", cwd: str | None = None) -> bool:
     except OSError as e:
         log(f"{cmd[0]}: {e}", prefix)
         return False
-    assert proc.stdout
-    for line in proc.stdout:
-        log(line.rstrip("\n"), prefix)
-    if code := proc.wait():
+    with proc:
+        assert proc.stdout
+        for line in proc.stdout:
+            log(line.rstrip("\n"), prefix)
+        code = proc.wait()
+    if code:
         log(f"{cmd[0]} exited with {code}", prefix)
     return code == 0
 
@@ -222,59 +108,18 @@ def download(url: str, dest: Path, timeout: float = 60) -> None:
         shutil.copyfileobj(resp, f)
 
 
-# --- setup ----------------------------------------------------------------------------------
-
-
-def install_mise(work: Path, arch: str) -> None:
-    dest = HOME / ".local" / "bin" / "mise"
-    if dest.is_file():
-        current = subprocess.run([str(dest), "--version"], capture_output=True, text=True)
-        if current.returncode == 0 and MISE_VERSION in current.stdout:
-            return
-    name = f"mise-v{MISE_VERSION}-linux-{'x64' if arch == 'x86_64' else 'arm64'}.tar.gz"
-    tarball = work / name
-    # mise.jdx.dev mirrors the GitHub release and stays up when GitHub 504s anonymous downloads
-    urls = [
-        f"https://mise.jdx.dev/v{MISE_VERSION}/{name}",
-        f"https://github.com/jdx/mise/releases/download/v{MISE_VERSION}/{name}",
-    ]
-    for attempt in range(3):
-        url = urls[attempt % len(urls)]
-        try:
-            download(url, tarball)
-            break
-        except OSError as e:
-            log(f"mise: {url} failed ({e})")
-            if attempt == 2:
-                raise
-            time.sleep(5)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(tarball) as tar, open(dest, "wb") as out:
-        member = tar.extractfile("mise/bin/mise")
-        assert member is not None
-        shutil.copyfileobj(member, out)
-    dest.chmod(0o755)
-    if os.access("/etc/profile.d", os.W_OK):
-        Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{TOOLS_PATH}:$PATH"\n')
-
-
-def install_global_tools() -> None:
-    config = HOME / ".config" / "mise" / "config.toml"
-    config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text(GLOBAL_TOOLS)
-    subprocess.run(["mise", "install", "--yes"], cwd=HOME, check=True)
-
-
-def install_self(signer: str) -> None:
-    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-    ALLOWED_SIGNERS.write_text(f"claude-env {signer}\n")
-    here = Path(__file__).resolve()
-    shutil.copy(here, SCRIPT)
-    shutil.copy(here.with_name("bootstrap.py.sig"), SCRIPT.with_name("bootstrap.py.sig"))
-
-
-def hook_command(subcommand: str) -> str:
-    return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} {subcommand}"
+def atomic_write(path: Path, text: str, mode: int | None = None) -> None:
+    """Replaces path with text in one step. Without mode only the user can read the file."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            if mode is not None:
+                os.fchmod(fd, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def replace_marked_block(existing: str, lines: list[str]) -> str:
@@ -284,174 +129,41 @@ def replace_marked_block(existing: str, lines: list[str]) -> str:
     return kept + "\n".join(["# >>> cloud-env", *lines, "# <<< cloud-env"]) + "\n"
 
 
-# Antigravity runs every command in a non-interactive bash shell with BASH_ENV=~/.bashrc
-def write_antigravity_bashrc() -> None:
-    path = HOME / ".bashrc"
-    existing = path.read_text() if path.exists() else ""
-    # Debian's default non-interactive early return would stop BASH_ENV before our block
-    existing = re.sub(r"(?ms)^case \$- in\n.*?^esac\n?", "", existing)
-    attempted = shlex.quote(str(ATTEMPT_MARKER))
-    env_file = shlex.quote(str(ANTIGRAVITY_ENV_FILE))
-    lines = [
-        f'case ":$PATH:" in *":{TOOLS_PATH}:"*) ;; *) export PATH="{TOOLS_PATH}:$PATH" ;; esac',
-        f'if [ -z "${{_CLOUD_ENV_RUNNING:-}}" ] && [ ! -e {attempted} ]; then',
-        f"  _CLOUD_ENV_RUNNING=1 {hook_command('session-start')}",
-        "fi",
-        # Subshells inherit the loaded env; re-sourcing would clobber per-command overrides
-        f'if [ -z "${{_CLOUD_ENV_LOADED:-}}" ] && [ -r {env_file} ]; then',
-        "  export _CLOUD_ENV_LOADED=1",
-        f"  . {env_file}",
-        "fi",
-    ]
-    path.write_text(replace_marked_block(existing, lines))
+def clean_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and not any(ord(c) < 0x20 for c in value)
 
 
-def set_hook(hooks: dict, event: str, group: dict) -> None:
-    """Replaces this script's hook group for event with group."""
-    groups = hooks.setdefault(event, [])
-    groups[:] = [
-        existing
-        for existing in groups
-        if not any(str(SCRIPT) in hook.get("command", "") for hook in existing.get("hooks", []))
-    ]
-    groups.append(group)
+def hook_command(subcommand: str) -> str:
+    return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} {subcommand}"
 
 
-# Merges into the existing settings so keys set by the image survive
-def write_claude_settings() -> None:
-    path = CLAUDE_DIR / "settings.json"
-    try:
-        settings = json.loads(path.read_text())
-    except FileNotFoundError:
-        settings = {}
-    except ValueError:
-        print(f"bootstrap: {path} is not valid JSON, replacing it", file=sys.stderr)
-        settings = {}
+# --- secrets: broker and 1Password ----------------------------------------------------------
 
-    settings["attribution"] = {"commit": "", "pr": "", "sessionUrl": False}
-    permissions = settings.setdefault("permissions", {})
-    allow = permissions.setdefault("allow", [])
-    allow += [rule for rule in ALLOWED_COMMANDS if rule not in allow]
-    deny = permissions.setdefault("deny", [])
-    deny += [rule for rule in (*PROXIED_GITHUB_WRITES, *DENIED_LINEAR_MCP) if rule not in deny]
-
-    auto_allow = settings.setdefault("autoMode", {}).setdefault("allow", [])
-    auto_allow += [rule for rule in ("$defaults", AUTO_MODE_ALLOW) if rule not in auto_allow]
-
-    hooks = settings.setdefault("hooks", {})
-    session_start = {"type": "command", "command": hook_command("session-start"), "timeout": 600}
-    set_hook(hooks, "SessionStart", {"hooks": [session_start]})
-    pre_tool_use = {"type": "command", "command": hook_command("pre-tool-use"), "timeout": 10}
-    set_hook(hooks, "PreToolUse", {"matcher": PRE_TOOL_USE_MATCHER, "hooks": [pre_tool_use]})
-
-    path.write_text(json.dumps(settings, indent=2) + "\n")
-
-
-def write_gemini_md(content: str) -> None:
-    """Writes ~/.gemini/GEMINI.md atomically when changed, since ~/.gemini is shared across VMs."""
-    with contextlib.suppress(OSError):
-        if GEMINI_MD.read_text() == content:
-            return
-    GEMINI_MD.parent.mkdir(parents=True, exist_ok=True)
-    # /shared/user/.gemini is virtiofs mapped to nobody:nogroup, so chmod raises EPERM
-    fd, tmp_name = tempfile.mkstemp(dir=GEMINI_MD.parent, prefix=".GEMINI.md.")
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.replace(tmp, GEMINI_MD)
-    except OSError as e:
-        log(f"gemini-md: write failed ({e})")
-        tmp.unlink(missing_ok=True)
-
-
-def cmd_setup() -> int:
-    signer = os.environ.get("SIGNER")
-    min_version = os.environ.get("MIN_VERSION", "")
-    if not signer or not min_version.isdigit():
-        sys.exit("bootstrap: SIGNER or MIN_VERSION is missing, both must be set by stub.sh")
-    if int(min_version) > VERSION:
-        sys.exit(
-            f"bootstrap: version {VERSION} is below MIN_VERSION {min_version}, refusing to run"
-        )
-    arch = platform.machine()
-    if arch not in ("x86_64", "aarch64"):
-        sys.exit(f"bootstrap: unsupported architecture {arch}")
-
-    os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ['PATH']}"
-    with tempfile.TemporaryDirectory() as tmp:
-        install_mise(Path(tmp), arch)
-    install_global_tools()
-    install_self(signer)
-    if ANTIGRAVITY:
-        write_antigravity_bashrc()
-        if not GEMINI_MD.exists():
-            write_gemini_md(render_gemini_md({}, None))
-    else:
-        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-        write_claude_settings()
-        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md({}, None))
-    print(f"bootstrap: version {VERSION} complete")
-    return 0
-
-
-# --- session-start: self-update -------------------------------------------------------------
-
-
-def script_version(source: bytes) -> int | None:
-    match = re.search(rb"^VERSION = (\d+)$", source, re.MULTILINE)
-    return int(match.group(1)) if match else None
-
-
-def verify_signature(script: Path, sig: Path) -> bool:
-    cmd = [
-        "ssh-keygen", "-Y", "verify", "-f", str(ALLOWED_SIGNERS),
-        "-I", "claude-env", "-n", SIGNING_NAMESPACE, "-s", str(sig),
-    ]  # fmt: skip
-    try:
-        with open(script, "rb") as f:
-            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
-    except OSError as e:
-        log(f"update: can't run ssh-keygen ({e})")
-        return False
-    if result.returncode != 0:
-        log(f"update: signature check failed: {result.stderr.strip()}")
-    return result.returncode == 0
-
-
-def self_update() -> None:
-    """Replaces the installed copy with a newer signed one from the repo and re-runs it.
-
-    Only the installed copy runs as the hook and it is only ever replaced by an equal or newer
-    version, so its VERSION is the floor: an old signed copy can't be replayed. Any failure
-    keeps the installed copy.
-    """
-    # Inside INSTALL_DIR so os.replace stays on one filesystem and is atomic
-    with tempfile.TemporaryDirectory(dir=INSTALL_DIR) as tmp:
-        script, sig = Path(tmp) / "bootstrap.py", Path(tmp) / "bootstrap.py.sig"
-        try:
-            download(f"{BASE_URL}/bootstrap.py", script, timeout=5)
-            download(f"{BASE_URL}/bootstrap.py.sig", sig, timeout=5)
-        except OSError as e:
-            log(f"update: fetch failed ({e}), running the installed copy")
-            return
-        source = script.read_bytes()
-        if source == SCRIPT.read_bytes() or not verify_signature(script, sig):
-            return
-        version = script_version(source)
-        if version is None or version < VERSION:
-            log(f"update: fetched version {version} is below {VERSION}, refusing it")
-            return
-        os.replace(sig, SCRIPT.with_name("bootstrap.py.sig"))
-        os.replace(script, SCRIPT)
-    log(f"update: installed version {version}, re-running")
-    os.execv(
-        sys.executable,
-        [sys.executable, "-I", str(SCRIPT), "session-start", "--no-update"],
+BROKER_TOKEN_FILE = HOME / ".gemini" / ".broker" / "token"
+INGRESS_TOKEN_FILE = Path(
+    os.environ.get(
+        "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
+        "/home/claude/.claude/remote/.session_ingress_token",
     )
+)
 
-
-# --- session-start: secrets -----------------------------------------------------------------
+ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
+# Never taken from the broker or 1Password: they would change how this script or the shell runs
+RESERVED_NAMES = {
+    "PATH", "HOME", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "CLAUDE_ENV_FILE", "CLAUDE_PROJECT_DIR", "GITHUB_TOKEN_FILE",
+}  # fmt: skip
+# Passed through to op, which needs the agent proxy to reach 1Password
+OP_PASSTHROUGH = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE")
+OP_TIMEOUT = 30
+# TS_AUTHKEY only goes to `tailscale up`, never into the session env
+TAILSCALE_ONLY = "TS_AUTHKEY"
+# Kept out of the secrets exported to the session: git identity variables override the per-owner
+# identity in git config, and gh and git get their GitHub tokens from this script
+SESSION_ENV_EXCLUDED = {
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_APP_TOKENS", "BOTICORN_TOKENS",
+}  # fmt: skip
 
 
 def ingress_sig_sample() -> str | None:
@@ -568,8 +280,8 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
     return variables
 
 
-def load_secrets() -> tuple[dict[str, str], bool]:
-    """Returns the session's secrets, and whether both the broker and 1Password delivered."""
+def fetch_secrets() -> tuple[dict[str, str], bool]:
+    """Returns the broker and 1Password variables, and whether both delivered."""
     broker = fetch_broker_env()
     if broker is None:
         log("broker: continuing without secrets")
@@ -587,7 +299,59 @@ def load_secrets() -> tuple[dict[str, str], bool]:
     return onepassword | broker, True
 
 
-# --- session-start: git, GitHub and the session env -----------------------------------------
+class Secrets(NamedTuple):
+    """The session's secrets, with the ones that never enter the environment split off."""
+
+    env: dict[str, str]
+    apps: dict[str, GitHubApp]
+    tailscale_authkey: str | None
+    # False when the broker or 1Password failed, so the next start loads them again
+    complete: bool
+
+
+def load_secrets() -> Secrets:
+    env, complete = fetch_secrets()
+    tailscale_authkey = env.pop(TAILSCALE_ONLY, None)
+    apps = github_apps(env)
+    env.pop("GITHUB_APP_TOKENS", None)
+    env.pop("BOTICORN_TOKENS", None)
+    return Secrets(env, apps, tailscale_authkey, complete)
+
+
+def session_env_lines(env: dict[str, str]) -> list[str]:
+    return [
+        f"export {name}={shlex.quote(value)}"
+        for name, value in env.items()
+        if name not in SESSION_ENV_EXCLUDED
+    ]
+
+
+# --- GitHub: app tokens, git identity, and the gh and git credentials -----------------------
+
+GITHUB_HOSTS = (
+    "api.github.com,github.com,codeload.github.com,objects.githubusercontent.com,"
+    "raw.githubusercontent.com,uploads.github.com"
+)
+
+# One file per owner with that owner's GitHub App token. Underscore names can't clash with
+# owners: `_default` serves other owners, `_stamp` times the next refresh, `_lock` guards it.
+TOKEN_DIR = Path("/dev/shm/cloud-env-github")
+DEFAULT_TOKEN = "_default"
+TOKEN_STAMP = TOKEN_DIR / "_stamp"
+TOKEN_LOCK = TOKEN_DIR / "_lock"
+# Installation tokens expire after an hour
+TOKEN_REFRESH_AFTER = 50 * 60
+TOKEN_RETRY_AFTER = 5 * 60
+GITHUB_OWNER = re.compile(r"[a-z0-9][a-z0-9-]*")
+# One git config file per owner with the commit identity of that owner's GitHub App
+GIT_IDENTITY_DIR = HOME / ".config" / "git" / "github-apps"
+# Identity file of version 1 copies, whose includes session start drops
+LEGACY_IDENTITY_FILE = HOME / ".config" / "git" / "boticorn"
+# Identity for BOTICORN_TOKENS entries, which carry only a token
+BOTICORN_NAME = "boticorn[bot]"
+BOTICORN_EMAIL = "323198915+boticorn[bot]@users.noreply.github.com"
+# Ahead of the mise shim on TOOLS_PATH
+GH_SHIM = HOME / ".local" / "bin" / "gh"
 
 
 class GitHubApp(NamedTuple):
@@ -596,10 +360,6 @@ class GitHubApp(NamedTuple):
     token: str
     name: str
     email: str
-
-
-def clean_text(value: object) -> bool:
-    return isinstance(value, str) and bool(value) and not any(ord(c) < 0x20 for c in value)
 
 
 def json_object(name: str, raw: str) -> dict:
@@ -647,18 +407,26 @@ def boticorn_entry(token: object) -> GitHubApp | None:
     return GitHubApp(token, BOTICORN_NAME, BOTICORN_EMAIL) if clean_text(token) else None
 
 
+def git_config(*args: str) -> bool:
+    return run(["git", "config", "--global", *args], "[git] ")
+
+
+def user_identity() -> tuple[str, str] | None:
+    name, email = os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL")
+    return (name, email) if name and email else None
+
+
 # The harness writes user.name=Claude into ~/.gitconfig. The user's identity from 1Password is
 # the global default, and repos of an owner with a GitHub App commit as that app.
-def set_git_identity(apps: dict[str, GitHubApp]) -> None:
-    name, email = os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL")
-    if name and email:
-        run(["git", "config", "--global", "user.name", name], "[git] ")
-        run(["git", "config", "--global", "user.email", email], "[git] ")
+def set_git_identity(identity: tuple[str, str] | None, apps: dict[str, GitHubApp]) -> None:
+    if identity:
+        git_config("user.name", identity[0])
+        git_config("user.email", identity[1])
     else:
         log("git: no GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL, keeping the existing identity")
     # The harness signing key is registered to noreply@anthropic.com, and while signing is on its
     # Stop hook asks for every other committer's commits to be rewritten to that address
-    run(["git", "config", "--global", "commit.gpgsign", "false"], "[git] ")
+    git_config("commit.gpgsign", "false")
 
     if not apps:
         log("git: no GitHub App tokens, keeping the app identity config from earlier starts")
@@ -683,8 +451,7 @@ def set_git_identity(apps: dict[str, GitHubApp]) -> None:
         # `**/<owner>/**` also matches the agent proxy's http://127.0.0.1:<port>/git/<owner>/<repo>.
         # git only supports `remote.*.url` here, so any remote on the owner counts, upstream too.
         for pattern in (f"**/{owner}/**", f"git@github.com:{owner}/**"):
-            key = f"includeIf.hasconfig:remote.*.url:{pattern}.path"
-            run(["git", "config", "--global", key, str(path)], "[git] ")
+            git_config(f"includeIf.hasconfig:remote.*.url:{pattern}.path", str(path))
 
 
 def repo_owner(repo: str) -> str | None:
@@ -701,23 +468,15 @@ def origin_owner(path: str) -> str | None:
     return repo_owner(url)
 
 
-def write_token(name: str, token: str) -> None:
-    tmp = TOKEN_DIR / f".{name}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(token)
-    os.replace(tmp, TOKEN_DIR / name)
-
-
 def store_github_tokens(apps: dict[str, GitHubApp], default: str | None) -> None:
     """Writes the token files. Tokens of owners missing from apps are kept: they still work
     until they expire."""
     TOKEN_DIR.mkdir(mode=0o700, exist_ok=True)
     TOKEN_DIR.chmod(0o700)
     for owner, app in apps.items():
-        write_token(owner, app.token)
+        atomic_write(TOKEN_DIR / owner, app.token)
     if default:
-        write_token(DEFAULT_TOKEN, default)
+        atomic_write(TOKEN_DIR / DEFAULT_TOKEN, default)
     if apps:
         TOKEN_STAMP.touch()
 
@@ -729,35 +488,28 @@ def bypass_proxy_for_github() -> None:
 
 def install_gh_shim() -> None:
     GH_SHIM.parent.mkdir(parents=True, exist_ok=True)
-    tmp = GH_SHIM.with_name(".gh.tmp")
-    tmp.write_text(f'#!/bin/sh\nexec {hook_command("gh")} "$@"\n')
-    tmp.chmod(0o755)
-    os.replace(tmp, GH_SHIM)
+    atomic_write(GH_SHIM, f'#!/bin/sh\nexec {hook_command("gh")} "$@"\n', mode=0o755)
 
 
-# Claude Code's agent proxy swaps GitHub credentials for a placeholder and only allows the session's
-# repos, so traffic goes direct there. Antigravity's proxy only swaps agy-h-* handles and blocks
-# direct egress, so GitHub stays on HTTPS_PROXY while git's credential helper and the gh shim pick
-# the token by the repo's owner. Returns the env file lines.
+# git's credential helper and the gh shim pick the token by the repo's owner, and GitHub traffic
+# skips the agent proxy where the harness needs that. Returns the env file lines.
 def use_github_directly(apps: dict[str, GitHubApp], default: str | None) -> list[str]:
     if not apps and not default:
         log("github: no GitHub token, leaving GitHub traffic on the agent proxy")
         return []
-    if not ANTIGRAVITY:
+    if HARNESS.github_bypasses_proxy:
         bypass_proxy_for_github()
     store_github_tokens(apps, default)
     install_gh_shim()
     # The empty helper drops ones configured earlier
     key = "credential.https://github.com.helper"
     subprocess.run(["git", "config", "--global", "--unset-all", key], capture_output=True)
-    run(["git", "config", "--global", "--add", key, ""], "[git] ")
-    run(["git", "config", "--global", "--add", key, "!" + hook_command("git-credential")], "[git] ")
-    run(
-        ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"], "[git] "
-    )
+    git_config("--add", key, "")
+    git_config("--add", key, "!" + hook_command("git-credential"))
+    git_config("credential.https://github.com.useHttpPath", "true")
     log(f"github: app tokens for {' '.join(sorted(apps)) or 'no owners'}")
     lines = []
-    if not ANTIGRAVITY:
+    if HARNESS.github_bypasses_proxy:
         lines += [
             f'export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}{GITHUB_HOSTS}"',
             f'export no_proxy="${{no_proxy:+$no_proxy,}}{GITHUB_HOSTS}"',
@@ -859,27 +611,84 @@ def cmd_gh(args: list[str]) -> int:
     os.execve(real, [real, *args], env)
 
 
-def write_env_block(lines: list[str]) -> bool:
-    """Writes the session env: to /dev/shm on Antigravity, or a marked block in $CLAUDE_ENV_FILE."""
-    if ANTIGRAVITY:
-        tmp = ANTIGRAVITY_ENV_FILE.with_name(f".{ANTIGRAVITY_ENV_FILE.name}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write("\n".join(lines) + "\n")
-        os.replace(tmp, ANTIGRAVITY_ENV_FILE)
-        return True
-    if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
-        log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
-        return False
-    path = Path(env_file)
-    existing = path.read_text() if path.exists() else ""
-    path.touch(mode=0o600)
-    path.chmod(0o600)  # before writing, so secrets never sit in a readable file
-    path.write_text(replace_marked_block(existing, lines))
-    return True
+# --- tools: mise and Tailscale --------------------------------------------------------------
+
+MISE_VERSION = "2026.10.17"
+GLOBAL_TOOLS = """\
+[tools]
+"aqua:1password/cli" = "2.41.1"
+"aqua:tailscale/tailscale" = "1.104.2"
+"npm:@schpet/linear-cli" = "3.1.0"
+age = "1.3.2"
+fnox = "1.42.0"
+gh = "2.103.0"
+trzsz-ssh = "0.1.26"
+"""
+REPO_MISE_CONFIGS = ("mise.toml", ".mise.toml", ".config/mise.toml", ".tool-versions")
+
+TAILSCALED_LOG = Path("/tmp/tailscaled.log")
+TAILSCALED_SOCKET = Path("/var/run/tailscale/tailscaled.sock")
+TAILSCALE_MARKER = Path("/dev/shm/.cloud-env-tailscale")
 
 
-# --- session-start: Tailscale and repo tools ------------------------------------------------
+def install_mise(work: Path, arch: str) -> None:
+    dest = HOME / ".local" / "bin" / "mise"
+    if dest.is_file():
+        current = subprocess.run([str(dest), "--version"], capture_output=True, text=True)
+        if current.returncode == 0 and MISE_VERSION in current.stdout:
+            return
+    name = f"mise-v{MISE_VERSION}-linux-{'x64' if arch == 'x86_64' else 'arm64'}.tar.gz"
+    tarball = work / name
+    # mise.jdx.dev mirrors the GitHub release and stays up when GitHub 504s anonymous downloads
+    urls = [
+        f"https://mise.jdx.dev/v{MISE_VERSION}/{name}",
+        f"https://github.com/jdx/mise/releases/download/v{MISE_VERSION}/{name}",
+    ]
+    for attempt in range(3):
+        url = urls[attempt % len(urls)]
+        try:
+            download(url, tarball)
+            break
+        except OSError as e:
+            log(f"mise: {url} failed ({e})")
+            if attempt == 2:
+                raise
+            time.sleep(5)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tarball) as tar, open(dest, "wb") as out:
+        member = tar.extractfile("mise/bin/mise")
+        assert member is not None
+        shutil.copyfileobj(member, out)
+    dest.chmod(0o755)
+    if os.access("/etc/profile.d", os.W_OK):
+        Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{TOOLS_PATH}:$PATH"\n')
+
+
+def install_global_tools() -> None:
+    config = HOME / ".config" / "mise" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(GLOBAL_TOOLS)
+    subprocess.run(["mise", "install", "--yes"], cwd=HOME, check=True)
+
+
+def repo_mise_projects() -> list[Path]:
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    candidates = [Path(project)] if project else HARNESS.attached_repos()
+    return [
+        repo for repo in candidates if any((repo / name).is_file() for name in REPO_MISE_CONFIGS)
+    ]
+
+
+# The hook runs inside the repo, and every mise call there (including the op and tailscale
+# shims) fails until the repo's mise config is trusted, so this runs before anything else.
+def trust_repo() -> None:
+    for project in repo_mise_projects():
+        run(["mise", "trust"], "[mise] ", cwd=str(project))
+
+
+def install_repo_tools() -> None:
+    for project in repo_mise_projects():
+        run(["mise", "install", "--yes"], "[mise] ", cwd=str(project))
 
 
 def tailscaled_running() -> bool:
@@ -914,9 +723,8 @@ def start_tailscaled(prefix: str) -> None:
 
 def join_tailscale(authkey: str | None) -> None:
     prefix = "[tailscale] "
-    # Antigravity's sandbox netns only exposes lo, so tailscaled's netmon pauses control login
-    if ANTIGRAVITY:
-        log("unsupported in Antigravity sandbox, skipping", prefix)
+    if not HARNESS.tailscale:
+        log("unsupported in this harness, skipping", prefix)
         return
     if not shutil.which("tailscaled"):
         log("not installed, skipping", prefix)
@@ -941,184 +749,7 @@ def join_tailscale(authkey: str | None) -> None:
         TAILSCALE_MARKER.touch()
 
 
-def repo_mise_projects() -> list[Path]:
-    if project := os.environ.get("CLAUDE_PROJECT_DIR"):
-        candidates = [Path(project)]
-    elif ANTIGRAVITY:
-        candidates = [
-            git_dir.parent for git_dir in sorted(HOME.glob("*/*/.git")) if git_dir.is_dir()
-        ]
-    else:
-        return []
-    return [
-        repo for repo in candidates if any((repo / name).is_file() for name in REPO_MISE_CONFIGS)
-    ]
-
-
-# The hook runs inside the repo, and every mise call there (including the op and tailscale
-# shims) fails until the repo's mise config is trusted, so this runs before anything else.
-def trust_repo() -> None:
-    for project in repo_mise_projects():
-        run(["mise", "trust"], "[mise] ", cwd=str(project))
-
-
-def install_repo_tools() -> None:
-    for project in repo_mise_projects():
-        run(["mise", "install", "--yes"], "[mise] ", cwd=str(project))
-
-
-# --- session-start --------------------------------------------------------------------------
-
-
-def session_start(update: bool) -> None:
-    """Prepares the session. Every step logs its failure and the session starts regardless.
-
-    1. On resume, stop unless Tailscale needs rejoining: the VM kept everything else.
-    2. Update to the newest signed copy of this script.
-    3. Load secrets from the broker and 1Password.
-    4. Configure git and GitHub, and write the session env.
-    5. Join Tailscale and install the repo's mise tools in parallel.
-    """
-    log("== session-start")
-    # Child processes must not trigger ~/.bashrc's session-start check on Antigravity
-    os.environ.pop("BASH_ENV", None)
-    os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ.get('PATH', '')}"
-    trust_repo()
-
-    resuming = INIT_MARKER.exists()
-    if resuming:
-        if not tailscale_needs_rejoin():
-            log("resume: state intact, nothing to do")
-            return
-        log("resume: tailscaled is gone, running the full start to rejoin")
-
-    if update:
-        self_update()
-    log(f"running version {VERSION}")
-
-    secrets, complete = load_secrets()
-    tailscale_authkey = secrets.pop(TAILSCALE_ONLY, None)
-    apps = github_apps(secrets)
-    secrets.pop("GITHUB_APP_TOKENS", None)
-    secrets.pop("BOTICORN_TOKENS", None)
-    os.environ.update(secrets)
-
-    set_git_identity(apps)
-    raw_identity = (os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL"))
-    identity = raw_identity if all(raw_identity) else None
-    if ANTIGRAVITY:
-        if apps or not GEMINI_MD.exists():
-            write_gemini_md(render_gemini_md(apps, identity))
-    elif apps or not resuming:
-        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md(apps, identity))
-    lines = [] if ANTIGRAVITY else [f'export PATH="{TOOLS_PATH}:$PATH"']
-    lines += [
-        f"export {name}={shlex.quote(value)}"
-        for name, value in secrets.items()
-        if name not in SESSION_ENV_EXCLUDED
-    ]
-    lines += use_github_directly(apps, secrets.get("GITHUB_TOKEN"))
-    if resuming and not complete:
-        # The session already has the env from its first start; rewriting would drop secrets
-        log("env: secrets incomplete, keeping the env file from the last start")
-    elif write_env_block(lines) and complete:
-        INIT_MARKER.touch()
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        tasks = [pool.submit(join_tailscale, tailscale_authkey), pool.submit(install_repo_tools)]
-    for task in tasks:
-        if error := task.exception():
-            log(f"step failed: {error!r}")
-    log("== session-start done")
-
-
-def cmd_session_start(update: bool) -> int:
-    # Hook stdout is shown to the model, so everything (including child output) goes to the log
-    fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    os.dup2(fd, 1)
-    os.dup2(fd, 2)
-    os.close(fd)
-    try:
-        if ANTIGRAVITY:
-            with open(SESSION_LOCK, "w") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                try:
-                    session_start(update)
-                finally:
-                    ATTEMPT_MARKER.touch()
-        else:
-            session_start(update)
-    except Exception as e:  # the session must start even if this script breaks
-        log(f"session-start failed: {e!r}")
-    return 0
-
-
-# --- pre-tool-use ---------------------------------------------------------------------------
-
-
-def strip_footer(value: object) -> object:
-    if isinstance(value, str):
-        # Keeps one line break where the footer sat mid-text, so paragraphs don't merge
-        return FOOTER.sub(lambda m: "" if m.end() == len(m.string) else "\n", value)
-    if isinstance(value, list):
-        return [strip_footer(item) for item in value]
-    if isinstance(value, dict):
-        return {k: strip_footer(v) for k, v in value.items()}
-    return value
-
-
-def has_footer(value: object) -> bool:
-    if isinstance(value, str):
-        return bool(FOOTER.search(value))
-    if isinstance(value, list):
-        return any(has_footer(item) for item in value)
-    if isinstance(value, dict):
-        # old_string has to match the file as it is, footer included
-        return any(has_footer(v) for k, v in value.items() if k != "old_string")
-    return False
-
-
-def cmd_pre_tool_use() -> int:
-    """Strips the footer from MCP tool input through updatedInput. Bash and file writes are
-    denied instead, since rewriting shell or file content behind Claude's back is not safe.
-    Malformed events pass through unchanged."""
-    try:
-        event = json.load(sys.stdin)
-        tool, tool_input = event["tool_name"], event["tool_input"]
-    except (ValueError, KeyError, TypeError):
-        return 0
-    if not isinstance(tool, str) or not isinstance(tool_input, dict):
-        return 0
-    if tool.startswith("mcp__"):
-        cleaned = strip_footer(tool_input)
-        if cleaned == tool_input:
-            return 0
-        output = {"updatedInput": cleaned}
-    elif has_footer(tool_input):
-        reason = "Remove the 'Generated by Claude Code' footer and retry."
-        output = {"permissionDecision": "deny", "permissionDecisionReason": reason}
-    else:
-        return 0
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **output}}))
-    return 0
-
-
-def main() -> int:
-    args = sys.argv[1:]
-    if args[:1] == ["setup"]:
-        return cmd_setup()
-    if args[:1] == ["session-start"]:
-        return cmd_session_start(update="--no-update" not in args)
-    if args[:1] == ["pre-tool-use"]:
-        return cmd_pre_tool_use()
-    if args[:1] == ["git-credential"]:
-        return cmd_git_credential(args[1:])
-    if args[:1] == ["gh"]:
-        return cmd_gh(args[1:])
-    sys.exit(
-        "usage: bootstrap.py setup | session-start [--no-update] | pre-tool-use | git-credential"
-    )
-
+# --- agent instructions ---------------------------------------------------------------------
 
 CLAUDE_MD = """\
 ## Comment and code quality
@@ -1188,8 +819,10 @@ When `LINEAR_API_KEY` is set in the shell environment, the Linear CLI (`linear`)
 
 ## Pull requests
 
+After creating a PR, keep watching it for review activity until it is merged or closed.
+
 - Always include either a GitHub issue number or a Linear issue link in your pull request.
-- When asked to watch or babysit a PR after creating it, keep watching for review activity until it is merged or closed. Poll with `gh` every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes (resetting to 5 minutes on new activity, stopping after 24 hours without activity; split waits longer than the shell timeout across multiple calls).
+- Poll with `gh` every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes (resetting to 5 minutes on new activity, stopping after 24 hours without activity; split waits longer than the shell timeout across multiple calls).
 - Activity means review comments, PR comments, review submissions, and failing checks.
 - When a new comment, reply, or review is directed at you and you plan to act on it, react to it with 👀 first. Do not react to comments you won't act on. For a review, put 👀 only on the main review message, not on inline review comments.
 - Handle every comment, including ones you decide not to act on: fix it, or reply briefly with why not, then resolve the review thread. For top-level comments that can't be resolved, reply. Load the `address-pr-review-comments` skill if available.
@@ -1199,9 +832,54 @@ When `LINEAR_API_KEY` is set in the shell environment, the Linear CLI (`linear`)
 """
 
 
-def github_identity_context(
-    apps: dict[str, GitHubApp], identity: tuple[str, str] | None
-) -> tuple[str, str, str, str]:
+class Instructions(NamedTuple):
+    """A harness's global instructions file, and how it words posting to GitHub as the user."""
+
+    base: str
+    # Closing rule when the session has no GitHub App tokens
+    without_apps: str
+    # Rule for repos outside the GitHub App owners, with a {user} placeholder
+    other_owners: str
+    # How to post "as me" on a GitHub App owner's repo
+    as_me: str
+
+
+CLAUDE_INSTRUCTIONS = Instructions(
+    base=CLAUDE_MD,
+    without_apps=(
+        "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
+        "write, use the `github` tools of the `dpn` MCP.\n"
+    ),
+    other_owners=(
+        "- On repos of any other owner, create issues, PRs and comments with the `github` tools "
+        "of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.\n"
+    ),
+    as_me="post through the `dpn` MCP too",
+)
+
+# gh with the token of Antigravity's GitHub plugin, which acts as the user
+PLUGIN_GH = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
+GEMINI_INSTRUCTIONS = Instructions(
+    base=GEMINI_BASE_MD,
+    without_apps=(
+        f"- Use `gh` for GitHub. Where its default token can't write, run `{PLUGIN_GH} ...` "
+        "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
+    ),
+    other_owners=(
+        "- On repos of any other owner, commits use {user}'s identity; to create issues, PRs, or "
+        f"comments where `gh`'s default token can't write, run `{PLUGIN_GH} ...` "
+        "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
+    ),
+    as_me=f"post via `{PLUGIN_GH} ...` (or the `dpn` MCP if connected)",
+)
+
+
+def render_instructions(
+    instructions: Instructions, apps: dict[str, GitHubApp], identity: tuple[str, str] | None
+) -> str:
+    """Returns the instructions file, ending with the GitHub identity rules for the app owners."""
+    if not apps:
+        return instructions.base + instructions.without_apps
     owners_by_app: dict[str, list[str]] = {}
     for owner, app in sorted(apps.items()):
         owners_by_app.setdefault(app.name, []).append(f"`{owner}`")
@@ -1220,48 +898,458 @@ def github_identity_context(
         )
     else:
         user, co_author, as_me = "the user", "", "commit with the user's identity"
-    return acting, user, co_author, as_me
-
-
-def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global CLAUDE.md, with the GitHub identity rules for the GitHub App owners."""
-    if not apps:
-        return CLAUDE_MD + (
-            "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
-            "write, use the `github` tools of the `dpn` MCP.\n"
-        )
-    acting, user, co_author, as_me = github_identity_context(apps, identity)
     return (
-        CLAUDE_MD
+        instructions.base
         + acting
         + f"""\
 - Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
 - `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
-- On repos of any other owner, create issues, PRs and comments with the `github` tools of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.
-- When the user asks to act "as me" on one of those repos, post through the `dpn` MCP too, and {as_me}.
 """
+        + instructions.other_owners.replace("{user}", user)
+        + f'- When the user asks to act "as me" on one of those repos, {instructions.as_me}, and {as_me}.\n'
     )
 
 
-def render_gemini_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global ~/.gemini/GEMINI.md for Antigravity environments."""
-    plugin_gh = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
-    if not apps:
-        return GEMINI_BASE_MD + (
-            f"- Use `gh` for GitHub. Where its default token can't write, run `{plugin_gh} ...` "
-            "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
+# --- Claude Code: settings and the pre-tool-use hook ----------------------------------------
+
+# Claude Code footer on GitHub posts, including any --- separator above it
+FOOTER = re.compile(
+    r"\n*(?:-{3,}[ \t]*\n+)?(?:🤖 )?_?Generated (?:by|with) "
+    r"\[Claude Code\]\(https://claude\.(?:ai/code|com/claude-code)[^)]*\)_?[ \t]*"
+)
+PRE_TOOL_USE_MATCHER = r"^(Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*[Gg]it[Hh]ub.*)$"
+# The proxied GitHub MCP server appends the footer after this hook runs, so these tools are
+# denied and posts go through gh
+PROXIED_GITHUB_WRITES = tuple(
+    f"mcp__github__{name}"
+    for name in (
+        "add_comment_to_pending_review",
+        "add_issue_comment",
+        "add_reply_to_pull_request_comment",
+        "create_pull_request",
+        "issue_write",
+        "pull_request_review_write",
+        "update_issue_comment",
+        "update_pull_request",
+    )
+)
+
+# Linear goes through the linear CLI, which the agent proxy authenticates as the bot
+DENIED_LINEAR_MCP = ("mcp__Linear", "mcp__dpn__linear_*")
+
+ALLOWED_COMMANDS = (
+    "Bash(op:*)",
+    "Bash(jq:*)",
+    "Bash(gh pr view:*)",
+    "Bash(gh pr diff:*)",
+    "Bash(gh pr checks:*)",
+    "Bash(gh pr comment:*)",
+    "mcp__claude-code-remote__*",
+)
+# The default External System Writes rule excludes thread replies and resolves, so
+# addressing review feedback through gh api gets blocked in auto mode
+AUTO_MODE_ALLOW = (
+    "PR Review Thread Work: When the user's own message asked the agent to work on, babysit, "
+    "or address review feedback on a specific PR in the repository this session was started "
+    "for, these writes on that PR are allowed: replying to its review comments or threads "
+    "(`gh api` POST `repos/{o}/{r}/pulls/{n}/comments/{id}/replies`, GraphQL "
+    "`addPullRequestReviewThreadReply`), resolving or unresolving its review threads (GraphQL "
+    "`resolveReviewThread`/`unresolveReviewThread`), posting PR comments, editing comments the "
+    "agent posted in this session, and re-requesting review from existing reviewers. Does not "
+    "cover merging, closing, approving or requesting changes, label or base changes, or writes "
+    "to any other PR or repository."
+)
+
+
+def set_hook(hooks: dict, event: str, group: dict) -> None:
+    """Replaces this script's hook group for event with group."""
+    groups = hooks.setdefault(event, [])
+    groups[:] = [
+        existing
+        for existing in groups
+        if not any(str(SCRIPT) in hook.get("command", "") for hook in existing.get("hooks", []))
+    ]
+    groups.append(group)
+
+
+# Merges into the existing settings so keys set by the image survive
+def write_claude_settings() -> None:
+    path = CLAUDE_DIR / "settings.json"
+    try:
+        settings = json.loads(path.read_text())
+    except FileNotFoundError:
+        settings = {}
+    except ValueError:
+        print(f"bootstrap: {path} is not valid JSON, replacing it", file=sys.stderr)
+        settings = {}
+
+    settings["attribution"] = {"commit": "", "pr": "", "sessionUrl": False}
+    permissions = settings.setdefault("permissions", {})
+    allow = permissions.setdefault("allow", [])
+    allow += [rule for rule in ALLOWED_COMMANDS if rule not in allow]
+    deny = permissions.setdefault("deny", [])
+    deny += [rule for rule in (*PROXIED_GITHUB_WRITES, *DENIED_LINEAR_MCP) if rule not in deny]
+
+    auto_allow = settings.setdefault("autoMode", {}).setdefault("allow", [])
+    auto_allow += [rule for rule in ("$defaults", AUTO_MODE_ALLOW) if rule not in auto_allow]
+
+    hooks = settings.setdefault("hooks", {})
+    session_start = {"type": "command", "command": hook_command("session-start"), "timeout": 600}
+    set_hook(hooks, "SessionStart", {"hooks": [session_start]})
+    pre_tool_use = {"type": "command", "command": hook_command("pre-tool-use"), "timeout": 10}
+    set_hook(hooks, "PreToolUse", {"matcher": PRE_TOOL_USE_MATCHER, "hooks": [pre_tool_use]})
+
+    path.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+def strip_footer(value: object) -> object:
+    if isinstance(value, str):
+        # Keeps one line break where the footer sat mid-text, so paragraphs don't merge
+        return FOOTER.sub(lambda m: "" if m.end() == len(m.string) else "\n", value)
+    if isinstance(value, list):
+        return [strip_footer(item) for item in value]
+    if isinstance(value, dict):
+        return {k: strip_footer(v) for k, v in value.items()}
+    return value
+
+
+def has_footer(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(FOOTER.search(value))
+    if isinstance(value, list):
+        return any(has_footer(item) for item in value)
+    if isinstance(value, dict):
+        # old_string has to match the file as it is, footer included
+        return any(has_footer(v) for k, v in value.items() if k != "old_string")
+    return False
+
+
+def cmd_pre_tool_use() -> int:
+    """Strips the footer from MCP tool input through updatedInput. Bash and file writes are
+    denied instead, since rewriting shell or file content behind Claude's back is not safe.
+    Malformed events pass through unchanged."""
+    try:
+        event = json.load(sys.stdin)
+        tool, tool_input = event["tool_name"], event["tool_input"]
+    except (ValueError, KeyError, TypeError):
+        return 0
+    if not isinstance(tool, str) or not isinstance(tool_input, dict):
+        return 0
+    if tool.startswith("mcp__"):
+        cleaned = strip_footer(tool_input)
+        if cleaned == tool_input:
+            return 0
+        output = {"updatedInput": cleaned}
+    elif has_footer(tool_input):
+        reason = "Remove the 'Generated by Claude Code' footer and retry."
+        output = {"permissionDecision": "deny", "permissionDecisionReason": reason}
+    else:
+        return 0
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **output}}))
+    return 0
+
+
+class ClaudeCode:
+    """Claude Code on the web: configured in ~/.claude, with the session env in $CLAUDE_ENV_FILE."""
+
+    # Its agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos
+    github_bypasses_proxy = True
+    tailscale = True
+    env_preamble = (f'export PATH="{TOOLS_PATH}:$PATH"',)
+
+    def setup(self) -> None:
+        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+        write_claude_settings()
+        (CLAUDE_DIR / "CLAUDE.md").write_text(render_instructions(CLAUDE_INSTRUCTIONS, {}, None))
+
+    def write_instructions(
+        self, apps: dict[str, GitHubApp], identity: tuple[str, str] | None, resuming: bool
+    ) -> None:
+        if apps or not resuming:
+            (CLAUDE_DIR / "CLAUDE.md").write_text(
+                render_instructions(CLAUDE_INSTRUCTIONS, apps, identity)
+            )
+
+    def write_env(self, lines: list[str]) -> bool:
+        """Replaces this script's block in $CLAUDE_ENV_FILE."""
+        if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
+            log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
+            return False
+        path = Path(env_file)
+        existing = path.read_text() if path.exists() else ""
+        path.touch(mode=0o600)
+        path.chmod(0o600)  # before writing, so secrets never sit in a readable file
+        path.write_text(replace_marked_block(existing, lines))
+        return True
+
+    def attached_repos(self) -> list[Path]:
+        """Returns the repos to set up when $CLAUDE_PROJECT_DIR doesn't name one."""
+        return []
+
+    @contextlib.contextmanager
+    def session(self) -> Iterator[None]:
+        yield
+
+
+# --- Antigravity: ~/.bashrc and GEMINI.md ---------------------------------------------------
+
+ATTEMPT_MARKER = Path("/dev/shm/.cloud-env-attempted")
+SESSION_LOCK = Path("/dev/shm/.cloud-env-session.lock")
+ANTIGRAVITY_ENV_FILE = Path("/dev/shm/cloud-env-session.sh")
+GEMINI_MD = HOME / ".gemini" / "GEMINI.md"
+
+
+# Antigravity runs every command in a non-interactive bash shell with BASH_ENV=~/.bashrc
+def write_antigravity_bashrc() -> None:
+    path = HOME / ".bashrc"
+    existing = path.read_text() if path.exists() else ""
+    # Debian's default non-interactive early return would stop BASH_ENV before our block
+    existing = re.sub(r"(?ms)^case \$- in\n.*?^esac\n?", "", existing)
+    attempted = shlex.quote(str(ATTEMPT_MARKER))
+    env_file = shlex.quote(str(ANTIGRAVITY_ENV_FILE))
+    lines = [
+        f'case ":$PATH:" in *":{TOOLS_PATH}:"*) ;; *) export PATH="{TOOLS_PATH}:$PATH" ;; esac',
+        f'if [ -z "${{_CLOUD_ENV_RUNNING:-}}" ] && [ ! -e {attempted} ]; then',
+        f"  _CLOUD_ENV_RUNNING=1 {hook_command('session-start')}",
+        "fi",
+        # Subshells inherit the loaded env; re-sourcing would clobber per-command overrides
+        f'if [ -z "${{_CLOUD_ENV_LOADED:-}}" ] && [ -r {env_file} ]; then',
+        "  export _CLOUD_ENV_LOADED=1",
+        f"  . {env_file}",
+        "fi",
+    ]
+    path.write_text(replace_marked_block(existing, lines))
+
+
+def write_gemini_md(content: str) -> None:
+    """Writes ~/.gemini/GEMINI.md atomically when changed, since ~/.gemini is shared across VMs."""
+    with contextlib.suppress(OSError):
+        if GEMINI_MD.read_text() == content:
+            return
+    GEMINI_MD.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # No mode: /shared/user/.gemini is virtiofs mapped to nobody:nogroup, so chmod raises EPERM
+        atomic_write(GEMINI_MD, content)
+    except OSError as e:
+        log(f"gemini-md: write failed ({e})")
+
+
+class Antigravity:
+    """Antigravity: configured in ~/.bashrc and ~/.gemini, with the session env in a file that
+    ~/.bashrc sources."""
+
+    # Its proxy only swaps agy-h-* handles and blocks direct egress, so GitHub stays on HTTPS_PROXY
+    github_bypasses_proxy = False
+    # The sandbox netns only exposes lo, so tailscaled's netmon pauses control login
+    tailscale = False
+    # ~/.bashrc already puts the tools on PATH
+    env_preamble = ()
+
+    def setup(self) -> None:
+        write_antigravity_bashrc()
+        if not GEMINI_MD.exists():
+            write_gemini_md(render_instructions(GEMINI_INSTRUCTIONS, {}, None))
+
+    def write_instructions(
+        self, apps: dict[str, GitHubApp], identity: tuple[str, str] | None, resuming: bool
+    ) -> None:
+        if apps or not GEMINI_MD.exists():
+            write_gemini_md(render_instructions(GEMINI_INSTRUCTIONS, apps, identity))
+
+    def write_env(self, lines: list[str]) -> bool:
+        atomic_write(ANTIGRAVITY_ENV_FILE, "\n".join(lines) + "\n")
+        return True
+
+    def attached_repos(self) -> list[Path]:
+        return [git_dir.parent for git_dir in sorted(HOME.glob("*/*/.git")) if git_dir.is_dir()]
+
+    @contextlib.contextmanager
+    def session(self) -> Iterator[None]:
+        """Runs one session start at a time, and marks the attempt for ~/.bashrc."""
+        with open(SESSION_LOCK, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                ATTEMPT_MARKER.touch()
+
+
+# --- install and self-update ----------------------------------------------------------------
+
+
+def install_self(signer: str) -> None:
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    ALLOWED_SIGNERS.write_text(f"claude-env {signer}\n")
+    here = Path(__file__).resolve()
+    shutil.copy(here, SCRIPT)
+    shutil.copy(here.with_name("bootstrap.py.sig"), SCRIPT.with_name("bootstrap.py.sig"))
+
+
+def script_version(source: bytes) -> int | None:
+    match = re.search(rb"^VERSION = (\d+)$", source, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def verify_signature(script: Path, sig: Path) -> bool:
+    cmd = [
+        "ssh-keygen", "-Y", "verify", "-f", str(ALLOWED_SIGNERS),
+        "-I", "claude-env", "-n", SIGNING_NAMESPACE, "-s", str(sig),
+    ]  # fmt: skip
+    try:
+        with open(script, "rb") as f:
+            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+    except OSError as e:
+        log(f"update: can't run ssh-keygen ({e})")
+        return False
+    if result.returncode != 0:
+        log(f"update: signature check failed: {result.stderr.strip()}")
+    return result.returncode == 0
+
+
+def self_update() -> None:
+    """Replaces the installed copy with a newer signed one from the repo and re-runs it.
+
+    Only the installed copy runs as the hook and it is only ever replaced by an equal or newer
+    version, so its VERSION is the floor: an old signed copy can't be replayed. Any failure
+    keeps the installed copy.
+    """
+    # Inside INSTALL_DIR so os.replace stays on one filesystem and is atomic
+    with tempfile.TemporaryDirectory(dir=INSTALL_DIR) as tmp:
+        script, sig = Path(tmp) / "bootstrap.py", Path(tmp) / "bootstrap.py.sig"
+        try:
+            download(f"{BASE_URL}/bootstrap.py", script, timeout=5)
+            download(f"{BASE_URL}/bootstrap.py.sig", sig, timeout=5)
+        except OSError as e:
+            log(f"update: fetch failed ({e}), running the installed copy")
+            return
+        source = script.read_bytes()
+        if source == SCRIPT.read_bytes() or not verify_signature(script, sig):
+            return
+        version = script_version(source)
+        if version is None or version < VERSION:
+            log(f"update: fetched version {version} is below {VERSION}, refusing it")
+            return
+        os.replace(sig, SCRIPT.with_name("bootstrap.py.sig"))
+        os.replace(script, SCRIPT)
+    log(f"update: installed version {version}, re-running")
+    os.execv(
+        sys.executable,
+        [sys.executable, "-I", str(SCRIPT), "session-start", "--no-update"],
+    )
+
+
+# --- setup and session-start ----------------------------------------------------------------
+
+
+HARNESS = Antigravity() if ANTIGRAVITY else ClaudeCode()
+
+
+def cmd_setup() -> int:
+    signer = os.environ.get("SIGNER")
+    min_version = os.environ.get("MIN_VERSION", "")
+    if not signer or not min_version.isdigit():
+        sys.exit("bootstrap: SIGNER or MIN_VERSION is missing, both must be set by stub.sh")
+    if int(min_version) > VERSION:
+        sys.exit(
+            f"bootstrap: version {VERSION} is below MIN_VERSION {min_version}, refusing to run"
         )
-    acting, user, co_author, as_me = github_identity_context(apps, identity)
-    return (
-        GEMINI_BASE_MD
-        + acting
-        + f"""\
-- Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
-- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
-- On repos of any other owner, commits use {user}'s identity; to create issues, PRs, or comments where `gh`'s default token can't write, run `{plugin_gh} ...` (when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.
-- When the user asks to act "as me" on one of those repos, post via `{plugin_gh} ...` (or the `dpn` MCP if connected), and {as_me}.
-"""
-    )
+    arch = platform.machine()
+    if arch not in ("x86_64", "aarch64"):
+        sys.exit(f"bootstrap: unsupported architecture {arch}")
+
+    os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ['PATH']}"
+    with tempfile.TemporaryDirectory() as tmp:
+        install_mise(Path(tmp), arch)
+    install_global_tools()
+    install_self(signer)
+    HARNESS.setup()
+    print(f"bootstrap: version {VERSION} complete")
+    return 0
+
+
+def session_start(update: bool) -> None:
+    """Prepares the session. Every step logs its failure and the session starts regardless.
+
+    1. On resume, stop unless Tailscale needs rejoining: the VM kept everything else.
+    2. Update to the newest signed copy of this script.
+    3. Load secrets from the broker and 1Password.
+    4. Configure git and GitHub, and write the session env.
+    5. Join Tailscale and install the repo's mise tools in parallel.
+    """
+    log("== session-start")
+    # Child processes must not trigger ~/.bashrc's session-start check on Antigravity
+    os.environ.pop("BASH_ENV", None)
+    os.environ["PATH"] = f"{TOOLS_PATH}:{os.environ.get('PATH', '')}"
+    trust_repo()
+
+    resuming = INIT_MARKER.exists()
+    if resuming:
+        if not tailscale_needs_rejoin():
+            log("resume: state intact, nothing to do")
+            return
+        log("resume: tailscaled is gone, running the full start to rejoin")
+
+    if update:
+        self_update()
+    log(f"running version {VERSION}")
+
+    secrets = load_secrets()
+    apps = secrets.apps
+    os.environ.update(secrets.env)
+    identity = user_identity()
+
+    set_git_identity(identity, apps)
+    HARNESS.write_instructions(apps, identity, resuming)
+    lines = [
+        *HARNESS.env_preamble,
+        *session_env_lines(secrets.env),
+        *use_github_directly(apps, secrets.env.get("GITHUB_TOKEN")),
+    ]
+    if resuming and not secrets.complete:
+        # The session already has the env from its first start; rewriting would drop secrets
+        log("env: secrets incomplete, keeping the env file from the last start")
+    elif HARNESS.write_env(lines) and secrets.complete:
+        INIT_MARKER.touch()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tasks = [
+            pool.submit(join_tailscale, secrets.tailscale_authkey),
+            pool.submit(install_repo_tools),
+        ]
+    for task in tasks:
+        if error := task.exception():
+            log(f"step failed: {error!r}")
+    log("== session-start done")
+
+
+def cmd_session_start(update: bool) -> int:
+    # Hook stdout is shown to the model, so everything (including child output) goes to the log
+    fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
+    try:
+        with HARNESS.session():
+            session_start(update)
+    except Exception as e:  # the session must start even if this script breaks
+        log(f"session-start failed: {e!r}")
+    return 0
+
+
+COMMANDS = {
+    "setup": lambda args: cmd_setup(),
+    "session-start": lambda args: cmd_session_start(update="--no-update" not in args),
+    "pre-tool-use": lambda args: cmd_pre_tool_use(),
+    "git-credential": cmd_git_credential,
+    "gh": cmd_gh,
+}
+
+
+def main() -> int:
+    name, *args = sys.argv[1:] or [""]
+    if command := COMMANDS.get(name):
+        return command(args)
+    sys.exit(f"usage: bootstrap.py {' | '.join(COMMANDS)}")
 
 
 if __name__ == "__main__":

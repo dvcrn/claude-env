@@ -1,3 +1,3 @@
 - After each change to `bootstrap.py`, sign it with `mise run sign`. It confirms that `bootstrap.py.sig` matches `signing_key.pub`.
-- Always run `mise run precommit` before committing. It lints and verifies that the staged `bootstrap.py.sig` matches the staged `bootstrap.py`, so a commit can't ship a file that cloud environments will refuse to run. `mise run install-hooks` installs it as the git pre-commit hook.
+- Always run `mise run precommit` before committing. It lints, runs the tests, and verifies that the staged `bootstrap.py.sig` matches the staged `bootstrap.py`, so a commit can't ship a file that cloud environments will refuse to run. `mise run install-hooks` installs it as the git pre-commit hook.
 - See [`docs/antigravity-learnings.md`](docs/antigravity-learnings.md) for Antigravity VM sandbox, `BASH_ENV`, proxy, and MCP/skills details before changing Antigravity bootstrap behavior.

@@ -1,0 +1,1 @@
+- Use `gh` for GitHub. Where its default token can't write, run `GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh ...` (when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.

@@ -65,7 +65,8 @@ If the broker can't be reached, the session starts without secrets.
 2. Raise `VERSION` if older signed copies should no longer run. Installed copies only update
    to an equal or higher `VERSION`, so a lower one is never picked up.
 3. `mise run sign` signs `bootstrap.py` with `CLAUDE_ENV_SIGNING_KEY` from fnox and runs
-   `mise run check`, which lints and verifies `bootstrap.py.sig` against `signing_key.pub`.
+   `mise run check`, which lints, runs the tests in `tests/`, and verifies `bootstrap.py.sig`
+   against `signing_key.pub`.
 4. Commit `bootstrap.py` and `bootstrap.py.sig` together. `mise run precommit` verifies the
    staged pair; `mise run install-hooks` installs it as the git pre-commit hook. CI runs
    `mise run check` on every push and pull request.

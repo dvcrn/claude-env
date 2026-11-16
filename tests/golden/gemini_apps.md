@@ -1,0 +1,6 @@
+- On repos owned by `acme`, `beta`, `gh` and `git` act as the `acme-bot[bot]` GitHub App.
+- On repos owned by `corp`, `gh` and `git` act as the `corp-bot[bot]` GitHub App.
+- Commits in those repos are authored as their app automatically (`git config user.name` shows it). End every commit message in those repos with the trailer `Co-authored-by: Ada Lovelace <ada@example.com>`.
+- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
+- On repos of any other owner, commits use Ada Lovelace <ada@example.com>'s identity; to create issues, PRs, or comments where `gh`'s default token can't write, run `GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh ...` (when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.
+- When the user asks to act "as me" on one of those repos, post via `GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh ...` (or the `dpn` MCP if connected), and commit with `git -c user.name='Ada Lovelace' -c user.email=ada@example.com commit ...` and without the trailer.
