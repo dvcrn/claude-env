@@ -88,7 +88,7 @@ class SessionStartTest(TempDirTest):
         self.env_file = self.tmp / "env.sh"
         self.claude_md = self.tmp / "CLAUDE.md"
         self.patch(
-            ANTIGRAVITY=False,
+            HARNESS=bootstrap.ClaudeCode(),
             CLAUDE_DIR=self.tmp,
             INIT_MARKER=self.marker,
             trust_repo=mock.Mock(),
@@ -178,7 +178,7 @@ class SetupTest(TempDirTest):
     def setUp(self) -> None:
         super().setUp()
         self.patch(
-            ANTIGRAVITY=False,
+            HARNESS=bootstrap.ClaudeCode(),
             CLAUDE_DIR=self.tmp / ".claude",
             install_mise=mock.Mock(),
             install_global_tools=mock.Mock(),

@@ -131,11 +131,11 @@ class GitConfigTest(TempDirTest):
         self.patch_env(NO_PROXY="localhost")
         unset = "unset GH_TOKEN GITHUB_TOKEN"
 
-        with mock.patch.object(bootstrap, "ANTIGRAVITY", True):
+        with mock.patch.object(bootstrap, "HARNESS", bootstrap.Antigravity()):
             self.assertEqual(bootstrap.use_github_directly({"acme": APP}, None), [unset])
         self.assertEqual(os.environ["NO_PROXY"], "localhost")
 
-        with mock.patch.object(bootstrap, "ANTIGRAVITY", False):
+        with mock.patch.object(bootstrap, "HARNESS", bootstrap.ClaudeCode()):
             lines = bootstrap.use_github_directly({"acme": APP}, "ghp_default")
         hosts = bootstrap.GITHUB_HOSTS
         self.assertEqual(

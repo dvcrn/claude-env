@@ -103,35 +103,107 @@ class AntigravityBashrcTest(TempDirTest):
         self.assertIn(f"  . {bootstrap.ANTIGRAVITY_ENV_FILE}\n", once)
 
 
-class EnvBlockTest(TempDirTest):
-    def test_claude_code_replaces_its_block_in_the_env_file(self) -> None:
+class ClaudeCodeTest(TempDirTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.harness = bootstrap.ClaudeCode()
+        self.patch(CLAUDE_DIR=self.tmp)
+
+    def test_replaces_its_block_in_the_env_file(self) -> None:
         env_file = self.tmp / "env.sh"
         env_file.write_text("export KEEP=1\n")
-        self.patch(ANTIGRAVITY=False)
         self.patch_env(CLAUDE_ENV_FILE=str(env_file))
 
-        self.assertTrue(bootstrap.write_env_block(["export A=1"]))
-        self.assertTrue(bootstrap.write_env_block(["export A=2"]))
+        self.assertTrue(self.harness.write_env(["export A=1"]))
+        self.assertTrue(self.harness.write_env(["export A=2"]))
 
         self.assertEqual(
             env_file.read_text(), "export KEEP=1\n# >>> cloud-env\nexport A=2\n# <<< cloud-env\n"
         )
         self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
 
-    def test_claude_code_without_env_file_reports_failure(self) -> None:
-        self.patch(ANTIGRAVITY=False)
+    def test_without_env_file_reports_failure(self) -> None:
         with mock.patch.dict(os.environ):
             os.environ.pop("CLAUDE_ENV_FILE", None)
-            self.assertFalse(bootstrap.write_env_block(["export A=1"]))
+            self.assertFalse(self.harness.write_env(["export A=1"]))
 
-    def test_antigravity_writes_a_private_file(self) -> None:
-        env_file = self.tmp / "cloud-env-session.sh"
-        self.patch(ANTIGRAVITY=True, ANTIGRAVITY_ENV_FILE=env_file)
+    def test_resume_without_apps_keeps_the_instructions(self) -> None:
+        claude_md = self.tmp / "CLAUDE.md"
+        self.harness.write_instructions({}, None, resuming=False)
+        self.assertEqual(claude_md.read_text(), bootstrap.render_claude_md({}, None))
+        self.harness.write_instructions(APPS, IDENTITY, resuming=True)
+        with_apps = bootstrap.render_claude_md(APPS, IDENTITY)
+        self.assertEqual(claude_md.read_text(), with_apps)
+        self.harness.write_instructions({}, None, resuming=True)
+        self.assertEqual(claude_md.read_text(), with_apps)
 
-        self.assertTrue(bootstrap.write_env_block(["export A=1", "export B=2"]))
 
+class AntigravityTest(TempDirTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.harness = bootstrap.Antigravity()
+        self.gemini_md = self.tmp / ".gemini" / "GEMINI.md"
+        self.patch(
+            HOME=self.tmp,
+            HARNESS=self.harness,
+            GEMINI_MD=self.gemini_md,
+            ANTIGRAVITY_ENV_FILE=self.tmp / "cloud-env-session.sh",
+            SESSION_LOCK=self.tmp / "session.lock",
+            ATTEMPT_MARKER=self.tmp / "attempted",
+        )
+
+    def test_setup_writes_the_bashrc_block_and_the_first_instructions(self) -> None:
+        self.harness.setup()
+        self.assertIn("# >>> cloud-env\n", (self.tmp / ".bashrc").read_text())
+        self.assertEqual(self.gemini_md.read_text(), bootstrap.render_gemini_md({}, None))
+
+        self.gemini_md.write_text("from another VM")
+        self.harness.setup()
+        self.assertEqual(self.gemini_md.read_text(), "from another VM")
+
+    def test_instructions_are_only_replaced_with_apps(self) -> None:
+        self.harness.write_instructions(APPS, IDENTITY, resuming=False)
+        with_apps = bootstrap.render_gemini_md(APPS, IDENTITY)
+        self.assertEqual(self.gemini_md.read_text(), with_apps)
+        self.harness.write_instructions({}, None, resuming=False)
+        self.assertEqual(self.gemini_md.read_text(), with_apps)
+
+    def test_writes_the_env_to_a_private_file(self) -> None:
+        self.assertTrue(self.harness.write_env(["export A=1", "export B=2"]))
+        env_file = bootstrap.ANTIGRAVITY_ENV_FILE
         self.assertEqual(env_file.read_text(), "export A=1\nexport B=2\n")
         self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+
+    def test_session_marks_the_attempt_even_when_the_start_fails(self) -> None:
+        with self.assertRaises(RuntimeError), self.harness.session():
+            raise RuntimeError("boom")
+        self.assertTrue(bootstrap.ATTEMPT_MARKER.exists())
+
+    def test_sets_up_every_attached_repo_with_a_mise_config(self) -> None:
+        with_mise = self.tmp / "acme" / "app"
+        (with_mise / ".git").mkdir(parents=True)
+        (with_mise / "mise.toml").write_text("[tools]\n")
+        (self.tmp / "acme" / "plain" / ".git").mkdir(parents=True)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            self.assertEqual(bootstrap.repo_mise_projects(), [with_mise])
+
+    def test_skips_tailscale(self) -> None:
+        with mock.patch.object(bootstrap, "run") as run:
+            bootstrap.join_tailscale("tskey-1")
+        run.assert_not_called()
+
+
+class RepoMiseProjectsTest(TempDirTest):
+    def test_claude_code_sets_up_the_project_dir(self) -> None:
+        (self.tmp / ".tool-versions").write_text("")
+        self.patch(HARNESS=bootstrap.ClaudeCode())
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.tmp)}):
+            self.assertEqual(bootstrap.repo_mise_projects(), [self.tmp])
+            (self.tmp / ".tool-versions").unlink()
+            self.assertEqual(bootstrap.repo_mise_projects(), [])
+            del os.environ["CLAUDE_PROJECT_DIR"]
+            self.assertEqual(bootstrap.repo_mise_projects(), [])
 
 
 class PreToolUseTest(unittest.TestCase):

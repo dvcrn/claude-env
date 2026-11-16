@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
@@ -490,15 +491,13 @@ def install_gh_shim() -> None:
     atomic_write(GH_SHIM, f'#!/bin/sh\nexec {hook_command("gh")} "$@"\n', mode=0o755)
 
 
-# Claude Code's agent proxy swaps GitHub credentials for a placeholder and only allows the session's
-# repos, so traffic goes direct there. Antigravity's proxy only swaps agy-h-* handles and blocks
-# direct egress, so GitHub stays on HTTPS_PROXY while git's credential helper and the gh shim pick
-# the token by the repo's owner. Returns the env file lines.
+# git's credential helper and the gh shim pick the token by the repo's owner, and GitHub traffic
+# skips the agent proxy where the harness needs that. Returns the env file lines.
 def use_github_directly(apps: dict[str, GitHubApp], default: str | None) -> list[str]:
     if not apps and not default:
         log("github: no GitHub token, leaving GitHub traffic on the agent proxy")
         return []
-    if not ANTIGRAVITY:
+    if HARNESS.github_bypasses_proxy:
         bypass_proxy_for_github()
     store_github_tokens(apps, default)
     install_gh_shim()
@@ -510,7 +509,7 @@ def use_github_directly(apps: dict[str, GitHubApp], default: str | None) -> list
     git_config("credential.https://github.com.useHttpPath", "true")
     log(f"github: app tokens for {' '.join(sorted(apps)) or 'no owners'}")
     lines = []
-    if not ANTIGRAVITY:
+    if HARNESS.github_bypasses_proxy:
         lines += [
             f'export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}{GITHUB_HOSTS}"',
             f'export no_proxy="${{no_proxy:+$no_proxy,}}{GITHUB_HOSTS}"',
@@ -673,14 +672,8 @@ def install_global_tools() -> None:
 
 
 def repo_mise_projects() -> list[Path]:
-    if project := os.environ.get("CLAUDE_PROJECT_DIR"):
-        candidates = [Path(project)]
-    elif ANTIGRAVITY:
-        candidates = [
-            git_dir.parent for git_dir in sorted(HOME.glob("*/*/.git")) if git_dir.is_dir()
-        ]
-    else:
-        return []
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    candidates = [Path(project)] if project else HARNESS.attached_repos()
     return [
         repo for repo in candidates if any((repo / name).is_file() for name in REPO_MISE_CONFIGS)
     ]
@@ -730,9 +723,8 @@ def start_tailscaled(prefix: str) -> None:
 
 def join_tailscale(authkey: str | None) -> None:
     prefix = "[tailscale] "
-    # Antigravity's sandbox netns only exposes lo, so tailscaled's netmon pauses control login
-    if ANTIGRAVITY:
-        log("unsupported in Antigravity sandbox, skipping", prefix)
+    if not HARNESS.tailscale:
+        log("unsupported in this harness, skipping", prefix)
         return
     if not shutil.which("tailscaled"):
         log("not installed, skipping", prefix)
@@ -1044,6 +1036,46 @@ def cmd_pre_tool_use() -> int:
     return 0
 
 
+class ClaudeCode:
+    """Claude Code on the web: configured in ~/.claude, with the session env in $CLAUDE_ENV_FILE."""
+
+    # Its agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos
+    github_bypasses_proxy = True
+    tailscale = True
+    env_preamble = (f'export PATH="{TOOLS_PATH}:$PATH"',)
+
+    def setup(self) -> None:
+        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+        write_claude_settings()
+        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md({}, None))
+
+    def write_instructions(
+        self, apps: dict[str, GitHubApp], identity: tuple[str, str] | None, resuming: bool
+    ) -> None:
+        if apps or not resuming:
+            (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md(apps, identity))
+
+    def write_env(self, lines: list[str]) -> bool:
+        """Replaces this script's block in $CLAUDE_ENV_FILE."""
+        if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
+            log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
+            return False
+        path = Path(env_file)
+        existing = path.read_text() if path.exists() else ""
+        path.touch(mode=0o600)
+        path.chmod(0o600)  # before writing, so secrets never sit in a readable file
+        path.write_text(replace_marked_block(existing, lines))
+        return True
+
+    def attached_repos(self) -> list[Path]:
+        """Returns the repos to set up when $CLAUDE_PROJECT_DIR doesn't name one."""
+        return []
+
+    @contextlib.contextmanager
+    def session(self) -> Iterator[None]:
+        yield
+
+
 # --- Antigravity: ~/.bashrc and GEMINI.md ---------------------------------------------------
 
 ATTEMPT_MARKER = Path("/dev/shm/.cloud-env-attempted")
@@ -1085,6 +1117,46 @@ def write_gemini_md(content: str) -> None:
         atomic_write(GEMINI_MD, content)
     except OSError as e:
         log(f"gemini-md: write failed ({e})")
+
+
+class Antigravity:
+    """Antigravity: configured in ~/.bashrc and ~/.gemini, with the session env in a file that
+    ~/.bashrc sources."""
+
+    # Its proxy only swaps agy-h-* handles and blocks direct egress, so GitHub stays on HTTPS_PROXY
+    github_bypasses_proxy = False
+    # The sandbox netns only exposes lo, so tailscaled's netmon pauses control login
+    tailscale = False
+    # ~/.bashrc already puts the tools on PATH
+    env_preamble = ()
+
+    def setup(self) -> None:
+        write_antigravity_bashrc()
+        if not GEMINI_MD.exists():
+            write_gemini_md(render_gemini_md({}, None))
+
+    def write_instructions(
+        self, apps: dict[str, GitHubApp], identity: tuple[str, str] | None, resuming: bool
+    ) -> None:
+        if apps or not GEMINI_MD.exists():
+            write_gemini_md(render_gemini_md(apps, identity))
+
+    def write_env(self, lines: list[str]) -> bool:
+        atomic_write(ANTIGRAVITY_ENV_FILE, "\n".join(lines) + "\n")
+        return True
+
+    def attached_repos(self) -> list[Path]:
+        return [git_dir.parent for git_dir in sorted(HOME.glob("*/*/.git")) if git_dir.is_dir()]
+
+    @contextlib.contextmanager
+    def session(self) -> Iterator[None]:
+        """Runs one session start at a time, and marks the attempt for ~/.bashrc."""
+        with open(SESSION_LOCK, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                ATTEMPT_MARKER.touch()
 
 
 # --- install and self-update ----------------------------------------------------------------
@@ -1154,6 +1226,10 @@ def self_update() -> None:
 # --- setup and session-start ----------------------------------------------------------------
 
 
+# Both classes have the same attributes and methods
+HARNESS = Antigravity() if ANTIGRAVITY else ClaudeCode()
+
+
 def cmd_setup() -> int:
     signer = os.environ.get("SIGNER")
     min_version = os.environ.get("MIN_VERSION", "")
@@ -1172,32 +1248,9 @@ def cmd_setup() -> int:
         install_mise(Path(tmp), arch)
     install_global_tools()
     install_self(signer)
-    if ANTIGRAVITY:
-        write_antigravity_bashrc()
-        if not GEMINI_MD.exists():
-            write_gemini_md(render_gemini_md({}, None))
-    else:
-        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-        write_claude_settings()
-        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md({}, None))
+    HARNESS.setup()
     print(f"bootstrap: version {VERSION} complete")
     return 0
-
-
-def write_env_block(lines: list[str]) -> bool:
-    """Writes the session env: to /dev/shm on Antigravity, or a marked block in $CLAUDE_ENV_FILE."""
-    if ANTIGRAVITY:
-        atomic_write(ANTIGRAVITY_ENV_FILE, "\n".join(lines) + "\n")
-        return True
-    if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
-        log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
-        return False
-    path = Path(env_file)
-    existing = path.read_text() if path.exists() else ""
-    path.touch(mode=0o600)
-    path.chmod(0o600)  # before writing, so secrets never sit in a readable file
-    path.write_text(replace_marked_block(existing, lines))
-    return True
 
 
 def session_start(update: bool) -> None:
@@ -1232,18 +1285,16 @@ def session_start(update: bool) -> None:
     identity = user_identity()
 
     set_git_identity(identity, apps)
-    if ANTIGRAVITY:
-        if apps or not GEMINI_MD.exists():
-            write_gemini_md(render_gemini_md(apps, identity))
-    elif apps or not resuming:
-        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md(apps, identity))
-    lines = [] if ANTIGRAVITY else [f'export PATH="{TOOLS_PATH}:$PATH"']
-    lines += session_env_lines(secrets.env)
-    lines += use_github_directly(apps, secrets.env.get("GITHUB_TOKEN"))
+    HARNESS.write_instructions(apps, identity, resuming)
+    lines = [
+        *HARNESS.env_preamble,
+        *session_env_lines(secrets.env),
+        *use_github_directly(apps, secrets.env.get("GITHUB_TOKEN")),
+    ]
     if resuming and not secrets.complete:
         # The session already has the env from its first start; rewriting would drop secrets
         log("env: secrets incomplete, keeping the env file from the last start")
-    elif write_env_block(lines) and secrets.complete:
+    elif HARNESS.write_env(lines) and secrets.complete:
         INIT_MARKER.touch()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1264,14 +1315,7 @@ def cmd_session_start(update: bool) -> int:
     os.dup2(fd, 2)
     os.close(fd)
     try:
-        if ANTIGRAVITY:
-            with open(SESSION_LOCK, "w") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                try:
-                    session_start(update)
-                finally:
-                    ATTEMPT_MARKER.touch()
-        else:
+        with HARNESS.session():
             session_start(update)
     except Exception as e:  # the session must start even if this script breaks
         log(f"session-start failed: {e!r}")
