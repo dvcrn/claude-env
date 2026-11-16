@@ -1,0 +1,1 @@
+- Use `gh` for GitHub. To create issues, PRs or comments where its token can't write, use the `github` tools of the `dpn` MCP.
