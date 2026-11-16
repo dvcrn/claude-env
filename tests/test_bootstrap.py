@@ -32,6 +32,13 @@ class GitHubAppsTest(unittest.TestCase):
                     )
                 },
             ),
+            (
+                {
+                    "GITHUB_APP_TOKENS": json.dumps({"acme": app}),
+                    "BOTICORN_TOKENS": json.dumps({"acme": "ghs_b"}),
+                },
+                {"acme": bootstrap.GitHubApp("ghs_a", "bot[bot]", "bot@example.com")},
+            ),
             ({"GITHUB_APP_TOKENS": "not json"}, {}),
             ({}, {}),
         ]
