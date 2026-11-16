@@ -4,11 +4,27 @@ import json
 import sys
 from pathlib import Path
 
-from cloud_env.apps.github.prompts import PROXIED_GITHUB_WRITES
-from cloud_env.apps.linear import DENIED_LINEAR_MCP
-from cloud_env.lib.log import hook_command
+from cloud_env.config import hook_command
 
 PRE_TOOL_USE_MATCHER = r"^(Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*[Gg]it[Hh]ub.*)$"
+
+# The proxied GitHub MCP server appends the footer after this hook runs, so these tools are
+# denied and posts go through gh
+PROXIED_GITHUB_WRITES = tuple(
+    f"mcp__github__{name}"
+    for name in (
+        "add_comment_to_pending_review",
+        "add_issue_comment",
+        "add_reply_to_pull_request_comment",
+        "create_pull_request",
+        "issue_write",
+        "pull_request_review_write",
+        "update_issue_comment",
+        "update_pull_request",
+    )
+)
+# Linear goes through the linear CLI, which the agent proxy authenticates as the bot
+DENIED_LINEAR_MCP = ("mcp__Linear", "mcp__dpn__linear_*")
 
 ALLOWED_COMMANDS = (
     "Bash(op:*)",

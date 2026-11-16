@@ -40,102 +40,25 @@ def module_path(src_dir: Path, mod_name: str) -> Path:
     raise SystemExit(f"build: cannot resolve module {mod_name!r} under {src_dir}")
 
 
-def resolve_import_module(current_mod: str, current_path: Path, node: ast.ImportFrom) -> str:
-    if node.level == 0:
-        if node.module is None:
-            raise SystemExit(f"build: invalid import in {current_path}:{node.lineno}")
-        return node.module
-    parts = current_mod.split(".")
-    if current_path.name != "__init__.py":
-        parts = parts[:-1]
-    up = node.level - 1
-    if up >= len(parts):
-        raise SystemExit(f"build: invalid relative import in {current_path}:{node.lineno}")
-    base = parts[: len(parts) - up]
-    if node.module:
-        base.extend(node.module.split("."))
-    return ".".join(base)
-
-
-def extract_target_names(target: ast.expr) -> set[str]:
-    if isinstance(target, ast.Name):
-        return {target.id}
-    if isinstance(target, ast.Tuple | ast.List):
-        names: set[str] = set()
-        for elt in target.elts:
-            names |= extract_target_names(elt)
-        return names
-    if isinstance(target, ast.Starred):
-        return extract_target_names(target.value)
-    return set()
-
-
-def defined_names(stmt: ast.stmt) -> set[str]:
-    if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+def defined_names(stmt: ast.stmt, path: Path) -> set[str]:
+    if isinstance(stmt, ast.FunctionDef | ast.ClassDef):
         return {stmt.name}
     if isinstance(stmt, ast.Assign):
         names: set[str] = set()
         for target in stmt.targets:
-            names |= extract_target_names(target)
+            if not isinstance(target, ast.Name):
+                raise SystemExit(
+                    f"build: {path}:{stmt.lineno}: top-level assignment target must be a simple name"
+                )
+            names.add(target.id)
         return names
     if isinstance(stmt, ast.AnnAssign):
-        return extract_target_names(stmt.target)
-    return set()
-
-
-def match_load_asset(stmt: ast.stmt, path: Path) -> tuple[str, str] | None:
-    if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
-        return None
-    target = stmt.targets[0]
-    call = stmt.value
-    if not isinstance(target, ast.Name) or not isinstance(call, ast.Call):
-        return None
-    if not isinstance(call.func, ast.Name) or call.func.id != "load_asset":
-        return None
-    if (
-        len(call.args) == 2
-        and not call.keywords
-        and isinstance(call.args[0], ast.Name)
-        and call.args[0].id == "__file__"
-        and isinstance(call.args[1], ast.Constant)
-        and isinstance(call.args[1].value, str)
-    ):
-        return target.id, call.args[1].value
-    raise SystemExit(
-        f"build: {path}:{stmt.lineno}: unsupported load_asset() call; "
-        'expected NAME = load_asset(__file__, "filename")'
-    )
-
-
-def check_nested_nodes(stmt: ast.stmt, current_mod: str, path: Path) -> None:
-    for node in ast.walk(stmt):
-        if node is stmt:
-            continue
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                root_pkg = alias.name.split(".")[0]
-                if root_pkg == PACKAGE or root_pkg not in sys.stdlib_module_names:
-                    raise SystemExit(
-                        f"build: {path}:{node.lineno}: nested import of {alias.name!r} "
-                        "is not supported"
-                    )
-        elif isinstance(node, ast.ImportFrom):
-            target_mod = resolve_import_module(current_mod, path, node)
-            root_pkg = target_mod.split(".")[0]
-            if root_pkg == PACKAGE or root_pkg not in sys.stdlib_module_names:
-                raise SystemExit(
-                    f"build: {path}:{node.lineno}: nested import from {target_mod!r} "
-                    "is not supported"
-                )
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "load_asset"
-        ):
+        if not isinstance(stmt.target, ast.Name):
             raise SystemExit(
-                f"build: {path}:{node.lineno}: load_asset() is only allowed in "
-                'top-level assignments (NAME = load_asset(__file__, "filename"))'
+                f"build: {path}:{stmt.lineno}: top-level assignment target must be a simple name"
             )
+        return {stmt.target.id}
+    return set()
 
 
 def check_stdlib_module(mod_name: str, path: Path, lineno: int) -> None:
@@ -158,6 +81,132 @@ def format_multiline_constant(var_name: str, content: str, path: Path) -> str:
     return f"{var_name} = {rhs}\n"
 
 
+def rewrite_load_asset(stmt: ast.stmt, path: Path, exports: set[str]) -> str | None:
+    if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+        return None
+    target = stmt.targets[0]
+    call = stmt.value
+    if not isinstance(target, ast.Name) or not isinstance(call, ast.Call):
+        return None
+    if not isinstance(call.func, ast.Name) or call.func.id != "load_asset":
+        return None
+    if not (
+        len(call.args) == 2
+        and not call.keywords
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "__file__"
+        and isinstance(call.args[1], ast.Constant)
+        and isinstance(call.args[1].value, str)
+    ):
+        raise SystemExit(
+            f"build: {path}:{stmt.lineno}: unsupported load_asset() call; "
+            'expected NAME = load_asset(__file__, "filename")'
+        )
+    asset_path = path.with_name(call.args[1].value)
+    if not asset_path.is_file():
+        raise SystemExit(f"build: {path}:{stmt.lineno}: missing asset {asset_path}")
+    content = asset_path.read_text(encoding="utf-8")
+    exports.add(target.id)
+    return format_multiline_constant(target.id, content, path)
+
+
+def handle_import(
+    stmt: ast.Import,
+    raw_stmt: str,
+    path: Path,
+    stdlib_imports: list[str],
+    stdlib_bindings: dict[str, tuple[str, str]],
+) -> None:
+    for alias in stmt.names:
+        if alias.name == PACKAGE or alias.name.startswith(f"{PACKAGE}."):
+            raise SystemExit(
+                f"build: {path}:{stmt.lineno}: use 'from {alias.name} import ...' "
+                "instead of dotted module imports"
+            )
+        check_stdlib_module(alias.name, path, stmt.lineno)
+        bound = alias.asname or alias.name.split(".")[0]
+        stdlib_bindings[bound] = ("import", alias.name if alias.asname else bound)
+    stdlib_imports.append(raw_stmt)
+
+
+def handle_import_from(
+    stmt: ast.ImportFrom,
+    raw_stmt: str,
+    path: Path,
+    deps: list[str],
+    imports_used: list[tuple[str, str]],
+    stdlib_imports: list[str],
+    stdlib_bindings: dict[str, tuple[str, str]],
+) -> None:
+    if stmt.level > 0 or stmt.module is None:
+        raise SystemExit(
+            f"build: {path}:{stmt.lineno}: relative imports are not supported; "
+            f"use 'from {PACKAGE}.<module> import ...'"
+        )
+    if stmt.module == "__future__":
+        return
+    target_mod = stmt.module
+    if target_mod == PACKAGE or target_mod.startswith(f"{PACKAGE}."):
+        for alias in stmt.names:
+            if alias.name == "*" or alias.asname is not None:
+                raise SystemExit(
+                    f"build: {path}:{stmt.lineno}: star or aliased internal imports "
+                    "are not supported"
+                )
+            if alias.name != "load_asset":
+                imports_used.append((target_mod, alias.name))
+        if target_mod not in deps:
+            deps.append(target_mod)
+        return
+    check_stdlib_module(target_mod, path, stmt.lineno)
+    for alias in stmt.names:
+        if alias.name == "*":
+            raise SystemExit(f"build: {path}:{stmt.lineno}: star stdlib imports are not supported")
+        bound = alias.asname or alias.name
+        stdlib_bindings[bound] = ("from", f"{target_mod}.{alias.name}")
+    stdlib_imports.append(raw_stmt)
+
+
+def check_nested_nodes(stmt: ast.stmt, path: Path) -> None:
+    for node in ast.walk(stmt):
+        if node is stmt:
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root_pkg = alias.name.split(".")[0]
+                if root_pkg == PACKAGE or root_pkg not in sys.stdlib_module_names:
+                    raise SystemExit(
+                        f"build: {path}:{node.lineno}: nested import of {alias.name!r} "
+                        "is not supported"
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            if node.level > 0 or node.module is None:
+                raise SystemExit(f"build: {path}:{node.lineno}: relative imports are not supported")
+            root_pkg = node.module.split(".")[0]
+            if root_pkg == PACKAGE or root_pkg not in sys.stdlib_module_names:
+                raise SystemExit(
+                    f"build: {path}:{node.lineno}: nested import from {node.module!r} "
+                    "is not supported"
+                )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "load_asset"
+        ):
+            raise SystemExit(
+                f"build: {path}:{node.lineno}: load_asset() is only allowed in "
+                'top-level assignments (NAME = load_asset(__file__, "filename"))'
+            )
+
+
+def is_docstring_expr(stmt: ast.stmt) -> bool:
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and isinstance(stmt.value.value, str)
+    )
+
+
 def is_main_guard(stmt: ast.stmt) -> bool:
     return (
         isinstance(stmt, ast.If)
@@ -170,6 +219,21 @@ def is_main_guard(stmt: ast.stmt) -> bool:
         and isinstance(stmt.test.comparators[0], ast.Constant)
         and stmt.test.comparators[0].value == "__main__"
     )
+
+
+def splice_lines(lines: list[str], replacements: dict[int, tuple[int, str]]) -> str:
+    out_chunks: list[str] = []
+    line_idx = 0
+    while line_idx < len(lines):
+        if line_idx in replacements:
+            end_idx, replacement = replacements[line_idx]
+            if replacement:
+                out_chunks.append(replacement)
+            line_idx = end_idx
+        else:
+            out_chunks.append(lines[line_idx])
+            line_idx += 1
+    return "".join(out_chunks).strip()
 
 
 def parse_module(src_dir: Path, mod_name: str) -> ModuleUnit:
@@ -189,95 +253,28 @@ def parse_module(src_dir: Path, mod_name: str) -> ModuleUnit:
         if stmt.end_lineno is None:
             raise SystemExit(f"build: missing end_lineno in {path}:{stmt.lineno}")
         start, end = stmt.lineno - 1, stmt.end_lineno
+        raw_stmt = "".join(lines[start:end])
 
-        # Strip per-module docstring (cli.py's docstring is emitted separately at file top)
-        if (
-            idx == 0
-            and isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Constant)
-            and isinstance(stmt.value.value, str)
+        if idx == 0 and is_docstring_expr(stmt):
+            replacements[start] = (end, "")
+        elif isinstance(stmt, ast.Import):
+            handle_import(stmt, raw_stmt, path, stdlib_imports, stdlib_bindings)
+            replacements[start] = (end, "")
+        elif isinstance(stmt, ast.ImportFrom):
+            handle_import_from(
+                stmt, raw_stmt, path, deps, imports_used, stdlib_imports, stdlib_bindings
+            )
+            replacements[start] = (end, "")
+        elif (isinstance(stmt, ast.FunctionDef) and stmt.name == "load_asset") or is_main_guard(
+            stmt
         ):
             replacements[start] = (end, "")
-            continue
-
-        if isinstance(stmt, ast.Import):
-            for alias in stmt.names:
-                if alias.name == PACKAGE or alias.name.startswith(f"{PACKAGE}."):
-                    raise SystemExit(
-                        f"build: {path}:{stmt.lineno}: use 'from {alias.name} import ...' "
-                        "instead of dotted module imports"
-                    )
-                check_stdlib_module(alias.name, path, stmt.lineno)
-                bound = alias.asname or alias.name.split(".")[0]
-                stdlib_bindings[bound] = ("import", alias.name)
-            stdlib_imports.append("".join(lines[start:end]))
-            replacements[start] = (end, "")
-            continue
-
-        if isinstance(stmt, ast.ImportFrom):
-            if stmt.level == 0 and stmt.module == "__future__":
-                replacements[start] = (end, "")
-                continue
-            target_mod = resolve_import_module(mod_name, path, stmt)
-            if target_mod == PACKAGE or target_mod.startswith(f"{PACKAGE}."):
-                for alias in stmt.names:
-                    if alias.name == "*" or alias.asname is not None:
-                        raise SystemExit(
-                            f"build: {path}:{stmt.lineno}: star or aliased internal imports "
-                            "are not supported"
-                        )
-                    if alias.name != "load_asset":
-                        imports_used.append((target_mod, alias.name))
-                if target_mod not in deps:
-                    deps.append(target_mod)
-                replacements[start] = (end, "")
-            else:
-                check_stdlib_module(target_mod, path, stmt.lineno)
-                for alias in stmt.names:
-                    if alias.name == "*":
-                        raise SystemExit(
-                            f"build: {path}:{stmt.lineno}: star stdlib imports are not supported"
-                        )
-                    bound = alias.asname or alias.name
-                    stdlib_bindings[bound] = ("from", f"{target_mod}.{alias.name}")
-                stdlib_imports.append("".join(lines[start:end]))
-                replacements[start] = (end, "")
-            continue
-
-        if isinstance(stmt, ast.FunctionDef) and stmt.name == "load_asset":
-            replacements[start] = (end, "")
-            continue
-
-        if asset := match_load_asset(stmt, path):
-            var_name, asset_name = asset
-            asset_path = path.with_name(asset_name)
-            if not asset_path.is_file():
-                raise SystemExit(f"build: {path}:{stmt.lineno}: missing asset {asset_path}")
-            content = asset_path.read_text(encoding="utf-8")
-            replacements[start] = (end, format_multiline_constant(var_name, content, path))
-            exports.add(var_name)
-            continue
-
-        if is_main_guard(stmt):
-            replacements[start] = (end, "")
-            continue
-
-        check_nested_nodes(stmt, mod_name, path)
-        exports |= defined_names(stmt)
-
-    out_chunks: list[str] = []
-    line_idx = 0
-    while line_idx < len(lines):
-        if line_idx in replacements:
-            end_idx, replacement = replacements[line_idx]
-            if replacement:
-                out_chunks.append(replacement)
-            line_idx = end_idx
+        elif inlined := rewrite_load_asset(stmt, path, exports):
+            replacements[start] = (end, inlined)
         else:
-            out_chunks.append(lines[line_idx])
-            line_idx += 1
+            check_nested_nodes(stmt, path)
+            exports |= defined_names(stmt, path)
 
-    body_text = "".join(out_chunks).strip()
     return ModuleUnit(
         name=mod_name,
         path=path,
@@ -288,7 +285,7 @@ def parse_module(src_dir: Path, mod_name: str) -> ModuleUnit:
         exports=exports,
         stdlib_imports=stdlib_imports,
         stdlib_bindings=stdlib_bindings,
-        body_text=body_text,
+        body_text=splice_lines(lines, replacements),
     )
 
 
@@ -367,12 +364,7 @@ def validate_symbols(modules: list[ModuleUnit]) -> None:
 
 
 def extract_docstring_block(unit: ModuleUnit) -> str:
-    if (
-        unit.tree.body
-        and isinstance(unit.tree.body[0], ast.Expr)
-        and isinstance(unit.tree.body[0].value, ast.Constant)
-        and isinstance(unit.tree.body[0].value.value, str)
-    ):
+    if unit.tree.body and is_docstring_expr(unit.tree.body[0]):
         stmt = unit.tree.body[0]
         assert stmt.end_lineno is not None
         lines = unit.source.splitlines(keepends=True)
@@ -380,10 +372,9 @@ def extract_docstring_block(unit: ModuleUnit) -> str:
     return ""
 
 
-def run_ruff(args: list[str], source: str, cwd: Path) -> str:
+def run_ruff(args: list[str], source: str) -> str:
     proc = subprocess.run(
         ["ruff", *args],
-        cwd=cwd,
         input=source,
         capture_output=True,
         text=True,
@@ -427,17 +418,14 @@ def build_source(root: Path) -> str:
     sorted_src = run_ruff(
         ["check", "--fix", "--select", "I", *cfg, "--stdin-filename", "bootstrap.py", "-"],
         raw,
-        root,
     )
     formatted = run_ruff(
         ["format", *cfg, "--stdin-filename", "bootstrap.py", "-"],
         sorted_src,
-        root,
     )
     run_ruff(
         ["check", *cfg, "--stdin-filename", "bootstrap.py", "-"],
         formatted,
-        root,
     )
 
     if not re.search(rb"^VERSION = (\d+)$", formatted.encode("utf-8"), re.MULTILINE):

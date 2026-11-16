@@ -19,7 +19,12 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
     variable in its output came from 1Password. NUL separators keep multiline values intact.
     """
     # The real binary; the mise shim would add its own variables
-    op_bin = subprocess.run(["mise", "which", "op"], capture_output=True, text=True).stdout.strip()
+    try:
+        op_bin = subprocess.run(
+            ["mise", "which", "op"], capture_output=True, text=True
+        ).stdout.strip()
+    except OSError:
+        op_bin = ""
     if not op_bin:
         log("1password: op is not installed")
         return None
@@ -28,18 +33,18 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
     # --no-masking: op otherwise replaces secret values on stdout with a placeholder
     cmd = [op_bin, "run", "--no-masking", "--environment", environment_id, "--", "/usr/bin/env", "-0"]  # fmt: skip
     try:
-        result = subprocess.run(
+        op_result = subprocess.run(
             cmd, env=base_env, capture_output=True, text=True, timeout=OP_TIMEOUT
         )
     except subprocess.TimeoutExpired:
         log(f"1password: op run timed out after {OP_TIMEOUT}s")
         return None
-    if result.returncode != 0:
-        log(f"1password: op run failed: {result.stderr.strip()}")
+    if op_result.returncode != 0:
+        log(f"1password: op run failed: {op_result.stderr.strip()}")
         return None
 
     variables = {}
-    for entry in filter(None, result.stdout.split("\0")):
+    for entry in filter(None, op_result.stdout.split("\0")):
         name, _, value = entry.partition("=")
         if name in base_env or name in ("PWD", "SHLVL", "_"):
             continue

@@ -3,7 +3,8 @@ from __future__ import annotations
 import contextlib
 from pathlib import Path
 
-from cloud_env.apps.github.prompts import GitHubApp, github_identity_context
+from cloud_env.apps.github.prompts import github_identity_context
+from cloud_env.apps.github.tokens import GitHubApp
 from cloud_env.lib.fs import atomic_write, load_asset
 from cloud_env.lib.log import log
 
@@ -11,7 +12,6 @@ GEMINI_BASE_MD = load_asset(__file__, "GEMINI.md")
 
 
 def render_gemini_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global ~/.gemini/GEMINI.md for Antigravity environments."""
     plugin_gh = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
     if not apps:
         return GEMINI_BASE_MD + (

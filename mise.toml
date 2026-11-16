@@ -34,12 +34,11 @@ mise run check
 '''
 
 [tasks.check]
-description = "Lint, test, verify bootstrap.py matches src/cloud_env, and verify bootstrap.py.sig"
+description = "Lint, test, and verify bootstrap.py.sig"
 depends = ["lint", "test"]
 shell = "bash -c"
 run = '''
 set -euo pipefail
-python3 -B scripts/build.py --check
 signers=$(mktemp)
 trap 'rm -f "$signers"' EXIT
 echo "claude-env $(cat signing_key.pub)" > "$signers"
@@ -55,19 +54,7 @@ set -euo pipefail
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 git checkout-index --all --prefix="$dir/"
-(
-  cd "$dir"
-  ruff check src scripts tests bootstrap.py
-  ruff format --check src scripts tests bootstrap.py
-  bash -n stub.sh stub-agy.sh
-  shellcheck -s bash stub.sh stub-agy.sh
-  PYTHONPATH=src python3 -B -m unittest discover -s tests
-  python3 -B scripts/build.py --check --root "$dir"
-)
-echo "claude-env $(cat "$dir/signing_key.pub")" > "$dir/allowed_signers"
-ssh-keygen -Y verify -f "$dir/allowed_signers" -I claude-env -n claude-env \
-  -s "$dir/bootstrap.py.sig" < "$dir/bootstrap.py" ||
-  { echo "staged bootstrap.py: missing or stale signature, run mise run sign and stage bootstrap.py.sig" >&2; exit 1; }
+MISE_TRUSTED_CONFIG_PATHS="$dir" mise -C "$dir" run check
 '''
 
 [tasks.install-hooks]

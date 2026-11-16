@@ -55,6 +55,7 @@ SIGNING_NAMESPACE = "claude-env"
 
 HOME = Path.home()
 SHM_DIR = Path("/dev/shm")
+ANTIGRAVITY = os.environ.get("ANTIGRAVITY_AGENT") == "1" or HOME.name == "antigravity"
 
 LOG_FILE = Path("/tmp/session-start.log")
 INIT_MARKER = SHM_DIR / ".cloud-env-initialized"
@@ -64,56 +65,8 @@ def tools_path(home: Path = HOME) -> str:
     return f"{home}/.local/bin:{home}/.local/share/mise/shims"
 
 
-# --- apps/github/prompts ------------------------------------------------------------------
-
-
-class GitHubApp(NamedTuple):
-    """An owner's GitHub App installation token and the identity its commits use."""
-
-    token: str
-    name: str
-    email: str
-
-
-# The proxied GitHub MCP server appends the footer after this hook runs, so these tools are
-# denied and posts go through gh
-PROXIED_GITHUB_WRITES = tuple(
-    f"mcp__github__{name}"
-    for name in (
-        "add_comment_to_pending_review",
-        "add_issue_comment",
-        "add_reply_to_pull_request_comment",
-        "create_pull_request",
-        "issue_write",
-        "pull_request_review_write",
-        "update_issue_comment",
-        "update_pull_request",
-    )
-)
-
-
-def github_identity_context(
-    apps: dict[str, GitHubApp], identity: tuple[str, str] | None
-) -> tuple[str, str, str, str]:
-    owners_by_app: dict[str, list[str]] = {}
-    for owner, app in sorted(apps.items()):
-        owners_by_app.setdefault(app.name, []).append(f"`{owner}`")
-    acting = "".join(
-        f"- On repos owned by {', '.join(owners)}, `gh` and `git` act as the `{name}` GitHub App.\n"
-        for name, owners in owners_by_app.items()
-    )
-    if identity:
-        user = f"{identity[0]} <{identity[1]}>"
-        co_author = (
-            f"End every commit message in those repos with the trailer `Co-authored-by: {user}`."
-        )
-        as_me = (
-            f"commit with `git -c user.name={shlex.quote(identity[0])} "
-            f"-c user.email={shlex.quote(identity[1])} commit ...` and without the trailer"
-        )
-    else:
-        user, co_author, as_me = "the user", "", "commit with the user's identity"
-    return acting, user, co_author, as_me
+def hook_command(subcommand: str, script: Path) -> str:
+    return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(script))} {subcommand}"
 
 
 # --- lib/fs -------------------------------------------------------------------------------
@@ -159,7 +112,6 @@ def log(message: str, prefix: str = "") -> None:
 
 
 def run(cmd: list[str], prefix: str = "", cwd: str | None = None) -> bool:
-    """Runs cmd, logging its combined output line by line under prefix."""
     try:
         proc = subprocess.Popen(
             cmd,
@@ -182,27 +134,11 @@ def run(cmd: list[str], prefix: str = "", cwd: str | None = None) -> bool:
     return code == 0
 
 
-def hook_command(subcommand: str, script: Path) -> str:
-    return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(script))} {subcommand}"
-
-
 # --- lib/parse ----------------------------------------------------------------------------
 
 
 def clean_text(value: object) -> bool:
     return isinstance(value, str) and bool(value) and not any(ord(c) < 0x20 for c in value)
-
-
-def json_object(name: str, raw: str) -> dict:
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        log(f"github: {name} is not JSON")
-        return {}
-    if not isinstance(parsed, dict):
-        log(f"github: {name} is not an object")
-        return {}
-    return parsed
 
 
 # --- agy/auth -----------------------------------------------------------------------------
@@ -233,163 +169,13 @@ def broker_token_headers(token_file: Path) -> dict[str, str]:
     return {"CF-Access-Client-Id": client_id, "CF-Access-Client-Secret": client_secret}
 
 
-# --- agy/bashrc ---------------------------------------------------------------------------
-
-
-# Antigravity runs every command in a non-interactive bash shell with BASH_ENV=~/.bashrc
-def write_antigravity_bashrc(
-    home: Path,
-    script: Path,
-    attempt_marker: Path,
-    env_file_path: Path,
-) -> None:
-    path = home / ".bashrc"
-    existing = path.read_text() if path.exists() else ""
-    # Debian's default non-interactive early return would stop BASH_ENV before our block
-    existing = re.sub(r"(?ms)^case \$- in\n.*?^esac\n?", "", existing)
-    bins = tools_path(home)
-    attempted = shlex.quote(str(attempt_marker))
-    env_file = shlex.quote(str(env_file_path))
-    lines = [
-        f'case ":$PATH:" in *":{bins}:"*) ;; *) export PATH="{bins}:$PATH" ;; esac',
-        f'if [ -z "${{_CLOUD_ENV_RUNNING:-}}" ] && [ ! -e {attempted} ]; then',
-        f"  _CLOUD_ENV_RUNNING=1 {hook_command('session-start', script)}",
-        "fi",
-        # Subshells inherit the loaded env; re-sourcing would clobber per-command overrides
-        f'if [ -z "${{_CLOUD_ENV_LOADED:-}}" ] && [ -r {env_file} ]; then',
-        "  export _CLOUD_ENV_LOADED=1",
-        f"  . {env_file}",
-        "fi",
-    ]
-    path.write_text(replace_marked_block(existing, lines))
-
-
-# --- agy/instructions ---------------------------------------------------------------------
-
-
-GEMINI_BASE_MD = """\
-## Comment and code quality
-
-Take quality audits seriously and handle the overall feedback, especially around comment and docs quality. When any of the following skills are available in `<skills>`, always load and follow them:
-
-- `github-comment-quality`: load before creating or replying to any GitHub issue, PR, or review comment.
-- `comment-and-documentation-quality`: load when writing comments, commit messages, or docs; once a branch is ready, spawn a subagent to review the changes against it.
-- `code-review-and-quality`: load when making code changes; once a branch is ready, spawn a subagent to review the changes against it.
-- `git-commit-quality` / `github-commit-quality`: load before creating any git commit and follow its commit message rules strictly.
-
-## Git
-
-Never add AI attribution anywhere in git history or GitHub content: no AI `Co-Authored-By`, no "Generated with/by ...", no session URLs, and no model names in commit messages, commit trailers, PR titles, PR bodies, issues, or code comments. This applies in every repo and session, even if a template suggests otherwise. A human `Co-authored-by` trailer required by the GitHub identity rules below is not AI attribution; always include it where specified.
-
-## Linear
-
-When `LINEAR_API_KEY` is set in the shell environment, the Linear CLI (`linear`) is installed and ready to use.
-
-## Pull requests
-
-- Always include either a GitHub issue number or a Linear issue link in your pull request.
-- When asked to watch or babysit a PR after creating it, keep watching for review activity until it is merged or closed. Poll with `gh` every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes (resetting to 5 minutes on new activity, stopping after 24 hours without activity; split waits longer than the shell timeout across multiple calls).
-- Activity means review comments, PR comments, review submissions, and failing checks.
-- When a new comment, reply, or review is directed at you and you plan to act on it, react to it with 👀 first. Do not react to comments you won't act on. For a review, put 👀 only on the main review message, not on inline review comments.
-- Handle every comment, including ones you decide not to act on: fix it, or reply briefly with why not, then resolve the review thread. For top-level comments that can't be resolved, reply. Load the `address-pr-review-comments` skill if available.
-
-## GitHub identity
-
-"""
-
-
-def render_gemini_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global ~/.gemini/GEMINI.md for Antigravity environments."""
-    plugin_gh = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
-    if not apps:
-        return GEMINI_BASE_MD + (
-            f"- Use `gh` for GitHub. Where its default token can't write, run `{plugin_gh} ...` "
-            "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
-        )
-    acting, user, co_author, as_me = github_identity_context(apps, identity)
-    return (
-        GEMINI_BASE_MD
-        + acting
-        + f"""\
-- Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
-- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
-- On repos of any other owner, commits use {user}'s identity; to create issues, PRs, or comments where `gh`'s default token can't write, run `{plugin_gh} ...` (when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.
-- When the user asks to act "as me" on one of those repos, post via `{plugin_gh} ...` (or the `dpn` MCP if connected), and {as_me}.
-"""
-    )
-
-
-def write_gemini_md(content: str, path: Path) -> None:
-    """Writes ~/.gemini/GEMINI.md atomically when changed, since ~/.gemini is shared across VMs."""
-    with contextlib.suppress(OSError):
-        if path.read_text() == content:
-            return
-    # /shared/user/.gemini is virtiofs mapped to nobody:nogroup, so mode stays None to skip chmod
-    try:
-        atomic_write(path, content)
-    except OSError as e:
-        log(f"gemini-md: write failed ({e})")
-
-
-# --- agy/harness --------------------------------------------------------------------------
-
-
-class AgyHarness:
-    bypass_github_proxy = False
-    supports_tailscale = False
-
-    def __init__(self, home: Path = HOME, shm_dir: Path = SHM_DIR) -> None:
-        self.home = home
-        self.install_dir = home / ".local" / "share" / "cloud-env"
-        self.script = self.install_dir / "bootstrap.py"
-        self.env_file = shm_dir / "cloud-env-session.sh"
-        self.attempt_marker = shm_dir / ".cloud-env-attempted"
-        self.session_lock = shm_dir / ".cloud-env-session.lock"
-        self.gemini_md = home / ".gemini" / "GEMINI.md"
-        self.broker_token_file = home / ".gemini" / ".broker" / "token"
-
-    def setup(self) -> None:
-        write_antigravity_bashrc(self.home, self.script, self.attempt_marker, self.env_file)
-        if not self.gemini_md.exists():
-            write_gemini_md(render_gemini_md({}, None), self.gemini_md)
-
-    @contextlib.contextmanager
-    def session_context(self) -> Iterator[None]:
-        self.session_lock.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.session_lock, "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                self.attempt_marker.touch()
-
-    def broker_headers(self) -> dict[str, str]:
-        return {
-            "X-Session-Id": os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""),
-            **broker_token_headers(self.broker_token_file),
-        }
-
-    def env_preamble(self) -> list[str]:
-        return []
-
-    def write_env(self, lines: list[str]) -> bool:
-        atomic_write(self.env_file, "\n".join(lines) + "\n", mode=0o600)
-        return True
-
-    def write_instructions(
-        self,
-        apps: dict[str, GitHubApp],
-        identity: tuple[str, str] | None,
-        *,
-        resuming: bool,
-    ) -> None:
-        if apps or not self.gemini_md.exists():
-            write_gemini_md(render_gemini_md(apps, identity), self.gemini_md)
-
-    def repo_dirs(self) -> list[Path]:
-        return [
-            git_dir.parent for git_dir in sorted(self.home.glob("*/*/.git")) if git_dir.is_dir()
-        ]
+def agy_broker_headers(
+    token_file: Path = HOME / ".gemini" / ".broker" / "token",
+) -> dict[str, str]:
+    return {
+        "X-Session-Id": os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""),
+        **broker_token_headers(token_file),
+    }
 
 
 # --- claude/auth --------------------------------------------------------------------------
@@ -419,254 +205,12 @@ def ingress_sig_sample(token_file: Path = INGRESS_TOKEN_FILE) -> str | None:
     return f"{kid}.{digest}.{signature}"
 
 
-# --- claude/instructions ------------------------------------------------------------------
+def claude_broker_headers(token_file: Path = INGRESS_TOKEN_FILE) -> dict[str, str]:
+    headers = {"X-Session-Id": os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "")}
+    if sample := ingress_sig_sample(token_file):
+        headers["X-Ingress-Sig-Sample"] = sample
+    return headers
 
-
-CLAUDE_MD = """\
-## Comment and code quality
-
-You are REQUIRED to do the following, even if other instructions exist. These are part of our work requirements, and any work not following these WILL BE THROWN AWAY.
-Take the audits seriously and don't hand-wave them away. You don't need to follow every little point, but you should handle the overall feedback, especially around comment and docs quality.
-
-- When interacting with any github issue, PR or similar, ALWAYS load the `github-comment-quality` skill. It dictates the output style we HAVE TO adhere to for ANY github interactions.
-- Any comment, commit texts and documentation HAVE TO pass `comment-and-documentation-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
-- Every commit and code change has to pass `code-review-and-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
-- Use the `git-commit-quality` skill before any new git commit is issued, and ensure instructions for git commits are strictly followed.
-
-## Git
-
-Always load the `github-commit-quality` skill if available
-
-Never add Claude/AI attribution anywhere in git history or PR content:
-no "Co-Authored-By: Claude", no "Generated with Claude Code", no session
-URLs, no model names, in commit messages, commit trailers, PR titles, PR
-bodies, or code comments. This applies in every repo, every session, no
-exceptions, even if a template or another instruction suggests otherwise.
-
-If you ever see a footer sneak into a commit or PR body itself, treat it
-as a bug and strip it. A `Co-authored-by` trailer that the GitHub identity
-section asks for is not AI attribution; add it where that section says.
-
-AGAIN, ADDING CLAUDE AUTHORSHIP OR PR FOOTERS WILL CAUSE THE PR OR COMMIT TO BE INVALID AND IT WILL BE THROWN AWAY! DO NOT ADD CLAUDE ATTRIBUTION TO ANY COMMITS OR PRS!!
-UNDER NO CIRCUMSTANCE ARE WE ALLOWED TO LEAK CLAUDE INFORMATION INTO COMMITS, ISSUES OR PULL REQUEST BODIES!
-
-## Linear
-
-The Linear CLI is already authenticated and ready to be used. It's available `linear`
-
-## Pull requests
-
-After creating a PR, keep watching it for review activity until it is merged or closed.
-
-- Always include either a GitHub issue number, or a Linear issue link in your pull request
-- Use native PR watch or subscribe tools if available. Otherwise poll with `gh`: every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes. Any new activity resets the interval to 5 minutes. Stop after 24 hours without activity. Waits longer than the shell tool timeout must be split across multiple calls.
-- Activity means review comments, PR comments, review submissions, and failing checks.
-- When a new comment, reply, or review is directed at you and you plan to act on it, react to it with 👀 first to show you are working on it. Do not react to comments you won't act on. For a review, put 👀 only on the main review message, not on the inline review comments.
-- Handle every comment, including ones you decide not to act on. Fix it, or reply briefly with why not, then resolve the review thread. For top-level comments that can't be resolved, reply. Use the `address-pr-review-comments` skill.
-
-## Tools
-
-- To interact with other Claude Code sessions (create them, send messages, etc.), use the `claude-code` MCP. If it isn't available, fall back to the built-in `claude-code-remote` tools.
-
-"""
-
-
-def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global CLAUDE.md, with the GitHub identity rules for the GitHub App owners."""
-    if not apps:
-        return CLAUDE_MD + (
-            "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
-            "write, use the `github` tools of the `dpn` MCP.\n"
-        )
-    acting, user, co_author, as_me = github_identity_context(apps, identity)
-    return (
-        CLAUDE_MD
-        + acting
-        + f"""\
-- Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
-- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
-- On repos of any other owner, create issues, PRs and comments with the `github` tools of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.
-- When the user asks to act "as me" on one of those repos, post through the `dpn` MCP too, and {as_me}.
-"""
-    )
-
-
-# --- apps/linear --------------------------------------------------------------------------
-
-
-# Linear goes through the linear CLI, which the agent proxy authenticates as the bot
-DENIED_LINEAR_MCP = ("mcp__Linear", "mcp__dpn__linear_*")
-
-# --- claude/settings ----------------------------------------------------------------------
-
-
-PRE_TOOL_USE_MATCHER = r"^(Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*[Gg]it[Hh]ub.*)$"
-
-ALLOWED_COMMANDS = (
-    "Bash(op:*)",
-    "Bash(jq:*)",
-    "Bash(gh pr view:*)",
-    "Bash(gh pr diff:*)",
-    "Bash(gh pr checks:*)",
-    "Bash(gh pr comment:*)",
-    "mcp__claude-code-remote__*",
-)
-# The default External System Writes rule excludes thread replies and resolves, so
-# addressing review feedback through gh api gets blocked in auto mode
-AUTO_MODE_ALLOW = (
-    "PR Review Thread Work: When the user's own message asked the agent to work on, babysit, "
-    "or address review feedback on a specific PR in the repository this session was started "
-    "for, these writes on that PR are allowed: replying to its review comments or threads "
-    "(`gh api` POST `repos/{o}/{r}/pulls/{n}/comments/{id}/replies`, GraphQL "
-    "`addPullRequestReviewThreadReply`), resolving or unresolving its review threads (GraphQL "
-    "`resolveReviewThread`/`unresolveReviewThread`), posting PR comments, editing comments the "
-    "agent posted in this session, and re-requesting review from existing reviewers. Does not "
-    "cover merging, closing, approving or requesting changes, label or base changes, or writes "
-    "to any other PR or repository."
-)
-
-
-def set_hook(hooks: dict, event: str, group: dict, script: Path) -> None:
-    """Replaces this script's hook group for event with group."""
-    target = str(script)
-    groups = hooks.setdefault(event, [])
-    groups[:] = [
-        existing
-        for existing in groups
-        if not any(target in hook.get("command", "") for hook in existing.get("hooks", []))
-    ]
-    groups.append(group)
-
-
-# Merges into the existing settings so keys set by the image survive
-def write_claude_settings(claude_dir: Path, script: Path) -> None:
-    path = claude_dir / "settings.json"
-    try:
-        settings = json.loads(path.read_text())
-    except FileNotFoundError:
-        settings = {}
-    except ValueError:
-        print(f"bootstrap: {path} is not valid JSON, replacing it", file=sys.stderr)
-        settings = {}
-
-    settings["attribution"] = {"commit": "", "pr": "", "sessionUrl": False}
-    permissions = settings.setdefault("permissions", {})
-    allow = permissions.setdefault("allow", [])
-    allow += [rule for rule in ALLOWED_COMMANDS if rule not in allow]
-    deny = permissions.setdefault("deny", [])
-    deny += [rule for rule in (*PROXIED_GITHUB_WRITES, *DENIED_LINEAR_MCP) if rule not in deny]
-
-    auto_allow = settings.setdefault("autoMode", {}).setdefault("allow", [])
-    auto_allow += [rule for rule in ("$defaults", AUTO_MODE_ALLOW) if rule not in auto_allow]
-
-    hooks = settings.setdefault("hooks", {})
-    session_start = {
-        "type": "command",
-        "command": hook_command("session-start", script),
-        "timeout": 600,
-    }
-    set_hook(hooks, "SessionStart", {"hooks": [session_start]}, script)
-    pre_tool_use = {
-        "type": "command",
-        "command": hook_command("pre-tool-use", script),
-        "timeout": 10,
-    }
-    set_hook(
-        hooks,
-        "PreToolUse",
-        {"matcher": PRE_TOOL_USE_MATCHER, "hooks": [pre_tool_use]},
-        script,
-    )
-
-    path.write_text(json.dumps(settings, indent=2) + "\n")
-
-
-# --- claude/harness -----------------------------------------------------------------------
-
-
-class ClaudeHarness:
-    bypass_github_proxy = True
-    supports_tailscale = True
-
-    def __init__(self, home: Path = HOME, ingress_token_file: Path = INGRESS_TOKEN_FILE) -> None:
-        self.home = home
-        self.claude_dir = home / ".claude"
-        self.install_dir = self.claude_dir / "hooks" / "claude-env"
-        self.script = self.install_dir / "bootstrap.py"
-        self.ingress_token_file = ingress_token_file
-
-    def setup(self) -> None:
-        self.claude_dir.mkdir(parents=True, exist_ok=True)
-        write_claude_settings(self.claude_dir, self.script)
-        (self.claude_dir / "CLAUDE.md").write_text(render_claude_md({}, None))
-
-    def session_context(self) -> contextlib.AbstractContextManager[None]:
-        return contextlib.nullcontext()
-
-    def broker_headers(self) -> dict[str, str]:
-        headers = {"X-Session-Id": os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "")}
-        if sample := ingress_sig_sample(self.ingress_token_file):
-            headers["X-Ingress-Sig-Sample"] = sample
-        return headers
-
-    def env_preamble(self) -> list[str]:
-        return [f'export PATH="{tools_path(self.home)}:$PATH"']
-
-    def write_env(self, lines: list[str]) -> bool:
-        if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
-            log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
-            return False
-        path = Path(env_file)
-        existing = path.read_text() if path.exists() else ""
-        path.touch(mode=0o600)
-        path.chmod(0o600)  # before writing, so secrets never sit in a readable file
-        path.write_text(replace_marked_block(existing, lines))
-        return True
-
-    def write_instructions(
-        self,
-        apps: dict[str, GitHubApp],
-        identity: tuple[str, str] | None,
-        *,
-        resuming: bool,
-    ) -> None:
-        if apps or not resuming:
-            (self.claude_dir / "CLAUDE.md").write_text(render_claude_md(apps, identity))
-
-    def repo_dirs(self) -> list[Path]:
-        if project := os.environ.get("CLAUDE_PROJECT_DIR"):
-            return [Path(project)]
-        return []
-
-
-# --- harness ------------------------------------------------------------------------------
-
-
-class Harness(Protocol):
-    install_dir: Path
-    script: Path
-    bypass_github_proxy: bool
-    supports_tailscale: bool
-
-    def setup(self) -> None: ...
-    def session_context(self) -> contextlib.AbstractContextManager[None]: ...
-    def broker_headers(self) -> dict[str, str]: ...
-    def env_preamble(self) -> list[str]: ...
-    def write_env(self, lines: list[str]) -> bool: ...
-    def write_instructions(
-        self,
-        apps: dict[str, GitHubApp],
-        identity: tuple[str, str] | None,
-        *,
-        resuming: bool,
-    ) -> None: ...
-    def repo_dirs(self) -> list[Path]: ...
-
-
-ANTIGRAVITY = os.environ.get("ANTIGRAVITY_AGENT") == "1" or HOME.name == "antigravity"
-HARNESS: Harness = AgyHarness() if ANTIGRAVITY else ClaudeHarness()
-INSTALL_DIR = HARNESS.install_dir
-SCRIPT = HARNESS.script
 
 # --- secrets/broker -----------------------------------------------------------------------
 
@@ -686,10 +230,12 @@ def fetch_broker_env(
     broker_url: str = BROKER_URL,
     auth_headers: Mapping[str, str] | None = None,
 ) -> dict[str, str] | None:
+    if auth_headers is None:
+        auth_headers = agy_broker_headers() if ANTIGRAVITY else claude_broker_headers()
     headers = {
         # Cloudflare's Browser Integrity Check rejects urllib's default User-Agent (error 1010)
         "User-Agent": f"claude-env-bootstrap/{VERSION}",
-        **(HARNESS.broker_headers() if auth_headers is None else auth_headers),
+        **auth_headers,
     }
     request = urllib.request.Request(f"{broker_url}/v1/session-env", headers=headers)
     try:
@@ -712,6 +258,26 @@ def fetch_broker_env(
 
 
 # --- apps/github/tokens -------------------------------------------------------------------
+
+
+class GitHubApp(NamedTuple):
+    """An owner's GitHub App installation token and the identity its commits use."""
+
+    token: str
+    name: str
+    email: str
+
+
+def json_object(name: str, raw: str) -> dict:
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        log(f"github: {name} is not JSON")
+        return {}
+    if not isinstance(parsed, dict):
+        log(f"github: {name} is not an object")
+        return {}
+    return parsed
 
 
 # One file per owner with that owner's GitHub App token. Underscore names can't clash with
@@ -831,6 +397,435 @@ def github_token(
     return None
 
 
+# --- agy/bashrc ---------------------------------------------------------------------------
+
+
+# Antigravity runs every command in a non-interactive bash shell with BASH_ENV=~/.bashrc
+def write_antigravity_bashrc(
+    home: Path,
+    script: Path,
+    attempt_marker: Path,
+    env_file_path: Path,
+) -> None:
+    path = home / ".bashrc"
+    existing = path.read_text() if path.exists() else ""
+    # Debian's default non-interactive early return would stop BASH_ENV before our block
+    existing = re.sub(r"(?ms)^case \$- in\n.*?^esac\n?", "", existing)
+    bins = tools_path(home)
+    attempted = shlex.quote(str(attempt_marker))
+    env_file = shlex.quote(str(env_file_path))
+    lines = [
+        f'case ":$PATH:" in *":{bins}:"*) ;; *) export PATH="{bins}:$PATH" ;; esac',
+        f'if [ -z "${{_CLOUD_ENV_RUNNING:-}}" ] && [ ! -e {attempted} ]; then',
+        f"  _CLOUD_ENV_RUNNING=1 {hook_command('session-start', script)}",
+        "fi",
+        # Subshells inherit the loaded env; re-sourcing would clobber per-command overrides
+        f'if [ -z "${{_CLOUD_ENV_LOADED:-}}" ] && [ -r {env_file} ]; then',
+        "  export _CLOUD_ENV_LOADED=1",
+        f"  . {env_file}",
+        "fi",
+    ]
+    path.write_text(replace_marked_block(existing, lines))
+
+
+# --- apps/github/prompts ------------------------------------------------------------------
+
+
+def github_identity_context(
+    apps: dict[str, GitHubApp], identity: tuple[str, str] | None
+) -> tuple[str, str, str, str]:
+    owners_by_app: dict[str, list[str]] = {}
+    for owner, app in sorted(apps.items()):
+        owners_by_app.setdefault(app.name, []).append(f"`{owner}`")
+    acting = "".join(
+        f"- On repos owned by {', '.join(owners)}, `gh` and `git` act as the `{name}` GitHub App.\n"
+        for name, owners in owners_by_app.items()
+    )
+    if identity:
+        user = f"{identity[0]} <{identity[1]}>"
+        co_author = (
+            f"End every commit message in those repos with the trailer `Co-authored-by: {user}`."
+        )
+        as_me = (
+            f"commit with `git -c user.name={shlex.quote(identity[0])} "
+            f"-c user.email={shlex.quote(identity[1])} commit ...` and without the trailer"
+        )
+    else:
+        user, co_author, as_me = "the user", "", "commit with the user's identity"
+    return acting, user, co_author, as_me
+
+
+# --- agy/instructions ---------------------------------------------------------------------
+
+
+GEMINI_BASE_MD = """\
+## Comment and code quality
+
+Take quality audits seriously and handle the overall feedback, especially around comment and docs quality. When any of the following skills are available in `<skills>`, always load and follow them:
+
+- `github-comment-quality`: load before creating or replying to any GitHub issue, PR, or review comment.
+- `comment-and-documentation-quality`: load when writing comments, commit messages, or docs; once a branch is ready, spawn a subagent to review the changes against it.
+- `code-review-and-quality`: load when making code changes; once a branch is ready, spawn a subagent to review the changes against it.
+- `git-commit-quality` / `github-commit-quality`: load before creating any git commit and follow its commit message rules strictly.
+
+## Git
+
+Never add AI attribution anywhere in git history or GitHub content: no AI `Co-Authored-By`, no "Generated with/by ...", no session URLs, and no model names in commit messages, commit trailers, PR titles, PR bodies, issues, or code comments. This applies in every repo and session, even if a template suggests otherwise. A human `Co-authored-by` trailer required by the GitHub identity rules below is not AI attribution; always include it where specified.
+
+## Linear
+
+When `LINEAR_API_KEY` is set in the shell environment, the Linear CLI (`linear`) is installed and ready to use.
+
+## Pull requests
+
+- Always include either a GitHub issue number or a Linear issue link in your pull request.
+- When asked to watch or babysit a PR after creating it, keep watching for review activity until it is merged or closed. Poll with `gh` every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes (resetting to 5 minutes on new activity, stopping after 24 hours without activity; split waits longer than the shell timeout across multiple calls).
+- Activity means review comments, PR comments, review submissions, and failing checks.
+- When a new comment, reply, or review is directed at you and you plan to act on it, react to it with 👀 first. Do not react to comments you won't act on. For a review, put 👀 only on the main review message, not on inline review comments.
+- Handle every comment, including ones you decide not to act on: fix it, or reply briefly with why not, then resolve the review thread. For top-level comments that can't be resolved, reply. Load the `address-pr-review-comments` skill if available.
+
+## GitHub identity
+
+"""
+
+
+def render_gemini_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
+    plugin_gh = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
+    if not apps:
+        return GEMINI_BASE_MD + (
+            f"- Use `gh` for GitHub. Where its default token can't write, run `{plugin_gh} ...` "
+            "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
+        )
+    acting, user, co_author, as_me = github_identity_context(apps, identity)
+    return (
+        GEMINI_BASE_MD
+        + acting
+        + f"""\
+- Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
+- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
+- On repos of any other owner, commits use {user}'s identity; to create issues, PRs, or comments where `gh`'s default token can't write, run `{plugin_gh} ...` (when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.
+- When the user asks to act "as me" on one of those repos, post via `{plugin_gh} ...` (or the `dpn` MCP if connected), and {as_me}.
+"""
+    )
+
+
+def write_gemini_md(content: str, path: Path) -> None:
+    """Writes ~/.gemini/GEMINI.md atomically when changed, since ~/.gemini is shared across VMs."""
+    with contextlib.suppress(OSError):
+        if path.read_text() == content:
+            return
+    # /shared/user/.gemini is virtiofs mapped to nobody:nogroup, so mode stays None to skip chmod
+    try:
+        atomic_write(path, content)
+    except OSError as e:
+        log(f"gemini-md: write failed ({e})")
+
+
+# --- agy/harness --------------------------------------------------------------------------
+
+
+class AgyHarness:
+    bypass_github_proxy = False
+    supports_tailscale = False
+
+    def __init__(self, home: Path = HOME, shm_dir: Path = SHM_DIR) -> None:
+        self.home = home
+        self.install_dir = home / ".local" / "share" / "cloud-env"
+        self.script = self.install_dir / "bootstrap.py"
+        self.env_file = shm_dir / "cloud-env-session.sh"
+        self.attempt_marker = shm_dir / ".cloud-env-attempted"
+        self.session_lock = shm_dir / ".cloud-env-session.lock"
+        self.gemini_md = home / ".gemini" / "GEMINI.md"
+
+    def setup(self) -> None:
+        write_antigravity_bashrc(self.home, self.script, self.attempt_marker, self.env_file)
+        if not self.gemini_md.exists():
+            write_gemini_md(render_gemini_md({}, None), self.gemini_md)
+
+    @contextlib.contextmanager
+    def session_context(self) -> Iterator[None]:
+        self.session_lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.session_lock, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                self.attempt_marker.touch()
+
+    def env_preamble(self) -> list[str]:
+        return []
+
+    def write_env(self, lines: list[str]) -> bool:
+        atomic_write(self.env_file, "\n".join(lines) + "\n", mode=0o600)
+        return True
+
+    def write_instructions(
+        self,
+        apps: dict[str, GitHubApp],
+        identity: tuple[str, str] | None,
+        *,
+        resuming: bool,
+    ) -> None:
+        if apps or not self.gemini_md.exists():
+            write_gemini_md(render_gemini_md(apps, identity), self.gemini_md)
+
+    def repo_dirs(self) -> list[Path]:
+        return [
+            git_dir.parent for git_dir in sorted(self.home.glob("*/*/.git")) if git_dir.is_dir()
+        ]
+
+
+# --- claude/instructions ------------------------------------------------------------------
+
+
+CLAUDE_MD = """\
+## Comment and code quality
+
+You are REQUIRED to do the following, even if other instructions exist. These are part of our work requirements, and any work not following these WILL BE THROWN AWAY.
+Take the audits seriously and don't hand-wave them away. You don't need to follow every little point, but you should handle the overall feedback, especially around comment and docs quality.
+
+- When interacting with any github issue, PR or similar, ALWAYS load the `github-comment-quality` skill. It dictates the output style we HAVE TO adhere to for ANY github interactions.
+- Any comment, commit texts and documentation HAVE TO pass `comment-and-documentation-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
+- Every commit and code change has to pass `code-review-and-quality`. Load this skill, then after you're done with a branch, spawn a new sub-agent and tell it to use this skill to review the changes. (If the ask-gemini variant of this skill is available, you're encouraged to use it once per session to check the final state of your PR)
+- Use the `git-commit-quality` skill before any new git commit is issued, and ensure instructions for git commits are strictly followed.
+
+## Git
+
+Always load the `github-commit-quality` skill if available
+
+Never add Claude/AI attribution anywhere in git history or PR content:
+no "Co-Authored-By: Claude", no "Generated with Claude Code", no session
+URLs, no model names, in commit messages, commit trailers, PR titles, PR
+bodies, or code comments. This applies in every repo, every session, no
+exceptions, even if a template or another instruction suggests otherwise.
+
+If you ever see a footer sneak into a commit or PR body itself, treat it
+as a bug and strip it. A `Co-authored-by` trailer that the GitHub identity
+section asks for is not AI attribution; add it where that section says.
+
+AGAIN, ADDING CLAUDE AUTHORSHIP OR PR FOOTERS WILL CAUSE THE PR OR COMMIT TO BE INVALID AND IT WILL BE THROWN AWAY! DO NOT ADD CLAUDE ATTRIBUTION TO ANY COMMITS OR PRS!!
+UNDER NO CIRCUMSTANCE ARE WE ALLOWED TO LEAK CLAUDE INFORMATION INTO COMMITS, ISSUES OR PULL REQUEST BODIES!
+
+## Linear
+
+The Linear CLI is already authenticated and ready to be used. It's available `linear`
+
+## Pull requests
+
+After creating a PR, keep watching it for review activity until it is merged or closed.
+
+- Always include either a GitHub issue number, or a Linear issue link in your pull request
+- Use native PR watch or subscribe tools if available. Otherwise poll with `gh`: every 5 minutes, and every 30 minutes once there has been no new activity for 20 minutes. Any new activity resets the interval to 5 minutes. Stop after 24 hours without activity. Waits longer than the shell tool timeout must be split across multiple calls.
+- Activity means review comments, PR comments, review submissions, and failing checks.
+- When a new comment, reply, or review is directed at you and you plan to act on it, react to it with 👀 first to show you are working on it. Do not react to comments you won't act on. For a review, put 👀 only on the main review message, not on the inline review comments.
+- Handle every comment, including ones you decide not to act on. Fix it, or reply briefly with why not, then resolve the review thread. For top-level comments that can't be resolved, reply. Use the `address-pr-review-comments` skill.
+
+## Tools
+
+- To interact with other Claude Code sessions (create them, send messages, etc.), use the `claude-code` MCP. If it isn't available, fall back to the built-in `claude-code-remote` tools.
+
+"""
+
+
+def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
+    if not apps:
+        return CLAUDE_MD + (
+            "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
+            "write, use the `github` tools of the `dpn` MCP.\n"
+        )
+    acting, user, co_author, as_me = github_identity_context(apps, identity)
+    return (
+        CLAUDE_MD
+        + acting
+        + f"""\
+- Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
+- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
+- On repos of any other owner, create issues, PRs and comments with the `github` tools of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.
+- When the user asks to act "as me" on one of those repos, post through the `dpn` MCP too, and {as_me}.
+"""
+    )
+
+
+# --- claude/settings ----------------------------------------------------------------------
+
+
+PRE_TOOL_USE_MATCHER = r"^(Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*[Gg]it[Hh]ub.*)$"
+
+# The proxied GitHub MCP server appends the footer after this hook runs, so these tools are
+# denied and posts go through gh
+PROXIED_GITHUB_WRITES = tuple(
+    f"mcp__github__{name}"
+    for name in (
+        "add_comment_to_pending_review",
+        "add_issue_comment",
+        "add_reply_to_pull_request_comment",
+        "create_pull_request",
+        "issue_write",
+        "pull_request_review_write",
+        "update_issue_comment",
+        "update_pull_request",
+    )
+)
+# Linear goes through the linear CLI, which the agent proxy authenticates as the bot
+DENIED_LINEAR_MCP = ("mcp__Linear", "mcp__dpn__linear_*")
+
+ALLOWED_COMMANDS = (
+    "Bash(op:*)",
+    "Bash(jq:*)",
+    "Bash(gh pr view:*)",
+    "Bash(gh pr diff:*)",
+    "Bash(gh pr checks:*)",
+    "Bash(gh pr comment:*)",
+    "mcp__claude-code-remote__*",
+)
+# The default External System Writes rule excludes thread replies and resolves, so
+# addressing review feedback through gh api gets blocked in auto mode
+AUTO_MODE_ALLOW = (
+    "PR Review Thread Work: When the user's own message asked the agent to work on, babysit, "
+    "or address review feedback on a specific PR in the repository this session was started "
+    "for, these writes on that PR are allowed: replying to its review comments or threads "
+    "(`gh api` POST `repos/{o}/{r}/pulls/{n}/comments/{id}/replies`, GraphQL "
+    "`addPullRequestReviewThreadReply`), resolving or unresolving its review threads (GraphQL "
+    "`resolveReviewThread`/`unresolveReviewThread`), posting PR comments, editing comments the "
+    "agent posted in this session, and re-requesting review from existing reviewers. Does not "
+    "cover merging, closing, approving or requesting changes, label or base changes, or writes "
+    "to any other PR or repository."
+)
+
+
+def set_hook(hooks: dict, event: str, group: dict, script: Path) -> None:
+    """Replaces this script's hook group for event with group."""
+    target = str(script)
+    groups = hooks.setdefault(event, [])
+    groups[:] = [
+        existing
+        for existing in groups
+        if not any(target in hook.get("command", "") for hook in existing.get("hooks", []))
+    ]
+    groups.append(group)
+
+
+# Merges into the existing settings so keys set by the image survive
+def write_claude_settings(claude_dir: Path, script: Path) -> None:
+    path = claude_dir / "settings.json"
+    try:
+        settings = json.loads(path.read_text())
+    except FileNotFoundError:
+        settings = {}
+    except ValueError:
+        print(f"bootstrap: {path} is not valid JSON, replacing it", file=sys.stderr)
+        settings = {}
+
+    settings["attribution"] = {"commit": "", "pr": "", "sessionUrl": False}
+    permissions = settings.setdefault("permissions", {})
+    allow = permissions.setdefault("allow", [])
+    allow += [rule for rule in ALLOWED_COMMANDS if rule not in allow]
+    deny = permissions.setdefault("deny", [])
+    deny += [rule for rule in (*PROXIED_GITHUB_WRITES, *DENIED_LINEAR_MCP) if rule not in deny]
+
+    auto_allow = settings.setdefault("autoMode", {}).setdefault("allow", [])
+    auto_allow += [rule for rule in ("$defaults", AUTO_MODE_ALLOW) if rule not in auto_allow]
+
+    hooks = settings.setdefault("hooks", {})
+    session_start = {
+        "type": "command",
+        "command": hook_command("session-start", script),
+        "timeout": 600,
+    }
+    set_hook(hooks, "SessionStart", {"hooks": [session_start]}, script)
+    pre_tool_use = {
+        "type": "command",
+        "command": hook_command("pre-tool-use", script),
+        "timeout": 10,
+    }
+    set_hook(
+        hooks,
+        "PreToolUse",
+        {"matcher": PRE_TOOL_USE_MATCHER, "hooks": [pre_tool_use]},
+        script,
+    )
+
+    path.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+# --- claude/harness -----------------------------------------------------------------------
+
+
+class ClaudeHarness:
+    bypass_github_proxy = True
+    supports_tailscale = True
+
+    def __init__(self, home: Path = HOME) -> None:
+        self.home = home
+        self.claude_dir = home / ".claude"
+        self.install_dir = self.claude_dir / "hooks" / "claude-env"
+        self.script = self.install_dir / "bootstrap.py"
+
+    def setup(self) -> None:
+        self.claude_dir.mkdir(parents=True, exist_ok=True)
+        write_claude_settings(self.claude_dir, self.script)
+        (self.claude_dir / "CLAUDE.md").write_text(render_claude_md({}, None))
+
+    def session_context(self) -> contextlib.AbstractContextManager[None]:
+        return contextlib.nullcontext()
+
+    def env_preamble(self) -> list[str]:
+        return [f'export PATH="{tools_path(self.home)}:$PATH"']
+
+    def write_env(self, lines: list[str]) -> bool:
+        if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
+            log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
+            return False
+        path = Path(env_file)
+        existing = path.read_text() if path.exists() else ""
+        path.touch(mode=0o600)
+        path.chmod(0o600)  # before writing, so secrets never sit in a readable file
+        path.write_text(replace_marked_block(existing, lines))
+        return True
+
+    def write_instructions(
+        self,
+        apps: dict[str, GitHubApp],
+        identity: tuple[str, str] | None,
+        *,
+        resuming: bool,
+    ) -> None:
+        if apps or not resuming:
+            (self.claude_dir / "CLAUDE.md").write_text(render_claude_md(apps, identity))
+
+    def repo_dirs(self) -> list[Path]:
+        if project := os.environ.get("CLAUDE_PROJECT_DIR"):
+            return [Path(project)]
+        return []
+
+
+# --- harness ------------------------------------------------------------------------------
+
+
+class Harness(Protocol):
+    install_dir: Path
+    script: Path
+    bypass_github_proxy: bool
+    supports_tailscale: bool
+
+    def setup(self) -> None: ...
+    def session_context(self) -> contextlib.AbstractContextManager[None]: ...
+    def env_preamble(self) -> list[str]: ...
+    def write_env(self, lines: list[str]) -> bool: ...
+    def write_instructions(
+        self,
+        apps: dict[str, GitHubApp],
+        identity: tuple[str, str] | None,
+        *,
+        resuming: bool,
+    ) -> None: ...
+    def repo_dirs(self) -> list[Path]: ...
+
+
+HARNESS: Harness = AgyHarness() if ANTIGRAVITY else ClaudeHarness()
+INSTALL_DIR = HARNESS.install_dir
+SCRIPT = HARNESS.script
+
 # --- apps/github/git ----------------------------------------------------------------------
 
 
@@ -898,12 +893,12 @@ def origin_owner(path: str) -> str | None:
     return repo_owner(url)
 
 
-def configure_git_credentials(script: Path = SCRIPT) -> None:
+def configure_git_credentials() -> None:
     # The empty helper drops ones configured earlier
     key = "credential.https://github.com.helper"
     subprocess.run(["git", "config", "--global", "--unset-all", key], capture_output=True)
     run(["git", "config", "--global", "--add", key, ""], "[git] ")
-    run(["git", "config", "--global", "--add", key, "!" + hook_command("git-credential", script)], "[git] ")  # fmt: skip
+    run(["git", "config", "--global", "--add", key, "!" + hook_command("git-credential", SCRIPT)], "[git] ")  # fmt: skip
     run(
         ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"],
         "[git] ",
@@ -924,12 +919,12 @@ def cmd_git_credential(args: list[str], token_dir: Path = TOKEN_DIR) -> int:
 # --- apps/github/gh -----------------------------------------------------------------------
 
 
-# Ahead of the mise shim on TOOLS_PATH
+# Ahead of the mise shims in tools_path()
 GH_SHIM = HOME / ".local" / "bin" / "gh"
 
 
-def install_gh_shim(shim: Path = GH_SHIM, script: Path = SCRIPT) -> None:
-    atomic_write(shim, f'#!/bin/sh\nexec {hook_command("gh", script)} "$@"\n', mode=0o755)
+def install_gh_shim() -> None:
+    atomic_write(GH_SHIM, f'#!/bin/sh\nexec {hook_command("gh", SCRIPT)} "$@"\n', mode=0o755)
 
 
 def gh_target_owner(args: list[str]) -> str | None:
@@ -1036,31 +1031,9 @@ def bypass_proxy_for_github() -> None:
         os.environ[var] = ",".join(filter(None, [os.environ.get(var), GITHUB_HOSTS]))
 
 
-# Claude Code's agent proxy swaps GitHub credentials for a placeholder and only allows the session's
-# repos, so traffic goes direct there. Antigravity's proxy only swaps agy-h-* handles and blocks
-# direct egress, so GitHub stays on HTTPS_PROXY while git's credential helper and the gh shim pick
-# the token by the repo's owner. Returns the env file lines.
-def use_github_directly(
-    apps: dict[str, GitHubApp],
-    default: str | None,
-    *,
-    bypass_proxy: bool | None = None,
-    token_dir: Path = TOKEN_DIR,
-    shim: Path = GH_SHIM,
-    script: Path = SCRIPT,
-) -> list[str]:
-    if not apps and not default:
-        log("github: no GitHub token, leaving GitHub traffic on the agent proxy")
-        return []
-    bypass = HARNESS.bypass_github_proxy if bypass_proxy is None else bypass_proxy
-    if bypass:
-        bypass_proxy_for_github()
-    store_github_tokens(apps, default, token_dir)
-    install_gh_shim(shim, script)
-    configure_git_credentials(script)
-    log(f"github: app tokens for {' '.join(sorted(apps)) or 'no owners'}")
+def github_env_lines(*, bypass_proxy: bool) -> list[str]:
     lines = []
-    if bypass:
+    if bypass_proxy:
         lines += [
             f'export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}{GITHUB_HOSTS}"',
             f'export no_proxy="${{no_proxy:+$no_proxy,}}{GITHUB_HOSTS}"',
@@ -1068,6 +1041,23 @@ def use_github_directly(
     # gh prefers these over the token the shim passes
     lines.append("unset GH_TOKEN GITHUB_TOKEN")
     return lines
+
+
+# Claude Code's agent proxy swaps GitHub credentials for a placeholder and only allows the session's
+# repos, so traffic goes direct there. Antigravity's proxy only swaps agy-h-* handles and blocks
+# direct egress, so GitHub stays on HTTPS_PROXY while git's credential helper and the gh shim pick
+# the token by the repo's owner.
+def use_github_directly(apps: dict[str, GitHubApp], default: str | None) -> list[str]:
+    if not apps and not default:
+        log("github: no GitHub token, leaving GitHub traffic on the agent proxy")
+        return []
+    if HARNESS.bypass_github_proxy:
+        bypass_proxy_for_github()
+    store_github_tokens(apps, default)
+    install_gh_shim()
+    configure_git_credentials()
+    log(f"github: app tokens for {' '.join(sorted(apps)) or 'no owners'}")
+    return github_env_lines(bypass_proxy=HARNESS.bypass_github_proxy)
 
 
 # --- lib/http -----------------------------------------------------------------------------
@@ -1097,8 +1087,8 @@ trzsz-ssh = "0.1.26"
 REPO_MISE_CONFIGS = ("mise.toml", ".mise.toml", ".config/mise.toml", ".tool-versions")
 
 
-def install_mise(work: Path, arch: str, home: Path = HOME) -> None:
-    dest = home / ".local" / "bin" / "mise"
+def install_mise(work: Path, arch: str) -> None:
+    dest = HOME / ".local" / "bin" / "mise"
     if dest.is_file():
         current = subprocess.run([str(dest), "--version"], capture_output=True, text=True)
         if current.returncode == 0 and MISE_VERSION in current.stdout:
@@ -1127,14 +1117,14 @@ def install_mise(work: Path, arch: str, home: Path = HOME) -> None:
         shutil.copyfileobj(member, out)
     dest.chmod(0o755)
     if os.access("/etc/profile.d", os.W_OK):
-        Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{tools_path(home)}:$PATH"\n')
+        Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{tools_path()}:$PATH"\n')
 
 
-def install_global_tools(home: Path = HOME) -> None:
-    config = home / ".config" / "mise" / "config.toml"
+def install_global_tools() -> None:
+    config = HOME / ".config" / "mise" / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(GLOBAL_TOOLS)
-    subprocess.run(["mise", "install", "--yes"], cwd=home, check=True)
+    subprocess.run(["mise", "install", "--yes"], cwd=HOME, check=True)
 
 
 def repo_mise_projects(candidates: list[Path] | None = None) -> list[Path]:
@@ -1168,9 +1158,9 @@ def tailscaled_running() -> bool:
     return subprocess.run(["pgrep", "-x", "tailscaled"], capture_output=True).returncode == 0
 
 
-def tailscale_needs_rejoin(marker: Path = TAILSCALE_MARKER) -> bool:
+def tailscale_needs_rejoin() -> bool:
     """Whether this VM joined Tailscale earlier and tailscaled has since died."""
-    return marker.exists() and not tailscaled_running()
+    return TAILSCALE_MARKER.exists() and not tailscaled_running()
 
 
 # tailscaled inherits HTTPS_PROXY, which is what lets it reach the control plane. In-memory
@@ -1194,12 +1184,8 @@ def start_tailscaled(prefix: str) -> None:
     log(f"tailscaled socket did not appear after 10s, see {TAILSCALED_LOG}", prefix)
 
 
-def join_tailscale(authkey: str | None, *, supported: bool | None = None) -> None:
+def join_tailscale(authkey: str | None) -> None:
     prefix = "[tailscale] "
-    # Antigravity's sandbox netns only exposes lo, so tailscaled's netmon pauses control login
-    if not (HARNESS.supports_tailscale if supported is None else supported):
-        log("unsupported in Antigravity sandbox, skipping", prefix)
-        return
     if not shutil.which("tailscaled"):
         log("not installed, skipping", prefix)
         return
@@ -1238,7 +1224,12 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
     variable in its output came from 1Password. NUL separators keep multiline values intact.
     """
     # The real binary; the mise shim would add its own variables
-    op_bin = subprocess.run(["mise", "which", "op"], capture_output=True, text=True).stdout.strip()
+    try:
+        op_bin = subprocess.run(
+            ["mise", "which", "op"], capture_output=True, text=True
+        ).stdout.strip()
+    except OSError:
+        op_bin = ""
     if not op_bin:
         log("1password: op is not installed")
         return None
@@ -1247,18 +1238,18 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
     # --no-masking: op otherwise replaces secret values on stdout with a placeholder
     cmd = [op_bin, "run", "--no-masking", "--environment", environment_id, "--", "/usr/bin/env", "-0"]  # fmt: skip
     try:
-        result = subprocess.run(
+        op_result = subprocess.run(
             cmd, env=base_env, capture_output=True, text=True, timeout=OP_TIMEOUT
         )
     except subprocess.TimeoutExpired:
         log(f"1password: op run timed out after {OP_TIMEOUT}s")
         return None
-    if result.returncode != 0:
-        log(f"1password: op run failed: {result.stderr.strip()}")
+    if op_result.returncode != 0:
+        log(f"1password: op run failed: {op_result.stderr.strip()}")
         return None
 
     variables = {}
-    for entry in filter(None, result.stdout.split("\0")):
+    for entry in filter(None, op_result.stdout.split("\0")):
         name, _, value = entry.partition("=")
         if name in base_env or name in ("PWD", "SHLVL", "_"):
             continue
@@ -1329,13 +1320,13 @@ def verify_signature(script: Path, sig: Path, allowed_signers: Path) -> bool:
     ]  # fmt: skip
     try:
         with open(script, "rb") as f:
-            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+            verify_result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
     except OSError as e:
         log(f"update: can't run ssh-keygen ({e})")
         return False
-    if result.returncode != 0:
-        log(f"update: signature check failed: {result.stderr.strip()}")
-    return result.returncode == 0
+    if verify_result.returncode != 0:
+        log(f"update: signature check failed: {verify_result.stderr.strip()}")
+    return verify_result.returncode == 0
 
 
 def self_update(
@@ -1380,27 +1371,42 @@ def self_update(
 # --- session ------------------------------------------------------------------------------
 
 
-def session_start(
-    update: bool,
-    *,
-    harness: Harness = HARNESS,
-    init_marker: Path = INIT_MARKER,
-) -> None:
-    """Prepares the session. Every step logs its failure and the session starts regardless.
+def unpack_session_secrets(
+    raw_secrets: Mapping[str, str],
+) -> tuple[dict[str, str], str | None, dict[str, GitHubApp]]:
+    secrets = dict(raw_secrets)
+    tailscale_authkey = secrets.pop(TAILSCALE_ONLY, None)
+    apps = github_apps(secrets)
+    secrets.pop("GITHUB_APP_TOKENS", None)
+    secrets.pop("BOTICORN_TOKENS", None)
+    return secrets, tailscale_authkey, apps
 
-    1. On resume, stop unless Tailscale needs rejoining: the VM kept everything else.
-    2. Update to the newest signed copy of this script.
-    3. Load secrets from the broker and 1Password.
-    4. Configure git and GitHub, and write the session env.
-    5. Join Tailscale and install the repo's mise tools in parallel.
-    """
+
+def format_session_env(
+    secrets: Mapping[str, str],
+    preamble: list[str],
+    github_lines: list[str],
+) -> list[str]:
+    return [
+        *preamble,
+        *(
+            f"export {var}={shlex.quote(value)}"
+            for var, value in secrets.items()
+            if var not in SESSION_ENV_EXCLUDED
+        ),
+        *github_lines,
+    ]
+
+
+def session_start(update: bool) -> None:
+    """Prepares the session. Every step logs its failure and the session starts regardless."""
     log("== session-start")
     # Child processes must not trigger ~/.bashrc's session-start check on Antigravity
     os.environ.pop("BASH_ENV", None)
     os.environ["PATH"] = f"{tools_path()}:{os.environ.get('PATH', '')}"
     trust_repo()
 
-    resuming = init_marker.exists()
+    resuming = INIT_MARKER.exists()
     if resuming:
         if not tailscale_needs_rejoin():
             log("resume: state intact, nothing to do")
@@ -1408,44 +1414,33 @@ def session_start(
         log("resume: tailscaled is gone, running the full start to rejoin")
 
     if update:
-        self_update(harness.install_dir)
+        self_update()
     log(f"running version {VERSION}")
 
-    secrets, complete = load_secrets()
-    tailscale_authkey = secrets.pop(TAILSCALE_ONLY, None)
-    apps = github_apps(secrets)
-    secrets.pop("GITHUB_APP_TOKENS", None)
-    secrets.pop("BOTICORN_TOKENS", None)
+    raw_secrets, complete = load_secrets()
+    secrets, tailscale_authkey, apps = unpack_session_secrets(raw_secrets)
     os.environ.update(secrets)
 
     set_git_identity(apps)
     name = os.environ.get("GIT_AUTHOR_NAME")
     email = os.environ.get("GIT_AUTHOR_EMAIL")
     identity = (name, email) if name and email else None
-    harness.write_instructions(apps, identity, resuming=resuming)
-    lines = harness.env_preamble()
-    lines += [
-        f"export {var}={shlex.quote(value)}"
-        for var, value in secrets.items()
-        if var not in SESSION_ENV_EXCLUDED
-    ]
-    lines += use_github_directly(
-        apps,
-        secrets.get("GITHUB_TOKEN"),
-        bypass_proxy=harness.bypass_github_proxy,
-        script=harness.script,
-    )
+    HARNESS.write_instructions(apps, identity, resuming=resuming)
+    github_lines = use_github_directly(apps, secrets.get("GITHUB_TOKEN"))
+    lines = format_session_env(secrets, HARNESS.env_preamble(), github_lines)
     if resuming and not complete:
         # The session already has the env from its first start; rewriting would drop secrets
         log("env: secrets incomplete, keeping the env file from the last start")
-    elif harness.write_env(lines) and complete:
-        init_marker.touch()
+    elif HARNESS.write_env(lines) and complete:
+        INIT_MARKER.touch()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        tasks = [
-            pool.submit(join_tailscale, tailscale_authkey, supported=harness.supports_tailscale),
-            pool.submit(install_repo_tools),
-        ]
+        tasks = [pool.submit(install_repo_tools)]
+        # Antigravity's sandbox netns only exposes lo, so tailscaled's netmon pauses control login
+        if HARNESS.supports_tailscale:
+            tasks.append(pool.submit(join_tailscale, tailscale_authkey))
+        else:
+            log("unsupported in Antigravity sandbox, skipping", "[tailscale] ")
     for task in tasks:
         if error := task.exception():
             log(f"step failed: {error!r}")

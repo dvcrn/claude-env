@@ -2,18 +2,40 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
-from cloud_env.apps.github.prompts import GitHubApp
 from cloud_env.config import LOG_FILE, SHM_DIR
 from cloud_env.lib.fs import atomic_write
 from cloud_env.lib.log import log
-from cloud_env.lib.parse import clean_text, json_object
+from cloud_env.lib.parse import clean_text
 from cloud_env.secrets.broker import fetch_broker_env
+
+
+class GitHubApp(NamedTuple):
+    """An owner's GitHub App installation token and the identity its commits use."""
+
+    token: str
+    name: str
+    email: str
+
+
+def json_object(name: str, raw: str) -> dict:
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        log(f"github: {name} is not JSON")
+        return {}
+    if not isinstance(parsed, dict):
+        log(f"github: {name} is not an object")
+        return {}
+    return parsed
+
 
 # One file per owner with that owner's GitHub App token. Underscore names can't clash with
 # owners: `_default` serves other owners, `_stamp` times the next refresh, `_lock` guards it.

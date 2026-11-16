@@ -6,8 +6,9 @@ import re
 import urllib.request
 from collections.abc import Mapping
 
-from cloud_env.config import VERSION
-from cloud_env.harness import HARNESS
+from cloud_env.agy.auth import agy_broker_headers
+from cloud_env.claude.auth import claude_broker_headers
+from cloud_env.config import ANTIGRAVITY, VERSION
 from cloud_env.lib.log import log
 
 BROKER_URL = os.environ.get("CLOUD_ENV_BROKER_URL", "https://broker.d.pn")
@@ -25,10 +26,12 @@ def fetch_broker_env(
     broker_url: str = BROKER_URL,
     auth_headers: Mapping[str, str] | None = None,
 ) -> dict[str, str] | None:
+    if auth_headers is None:
+        auth_headers = agy_broker_headers() if ANTIGRAVITY else claude_broker_headers()
     headers = {
         # Cloudflare's Browser Integrity Check rejects urllib's default User-Agent (error 1010)
         "User-Agent": f"claude-env-bootstrap/{VERSION}",
-        **(HARNESS.broker_headers() if auth_headers is None else auth_headers),
+        **auth_headers,
     }
     request = urllib.request.Request(f"{broker_url}/v1/session-env", headers=headers)
     try:

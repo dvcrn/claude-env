@@ -12,13 +12,13 @@ from unittest import mock
 
 from cloud_env.apps.github.gh import gh_target_owner
 from cloud_env.apps.github.git import cmd_git_credential, repo_owner, set_git_identity
-from cloud_env.apps.github.prompts import GitHubApp
-from cloud_env.apps.github.routing import use_github_directly
+from cloud_env.apps.github.routing import bypass_proxy_for_github, github_env_lines
 from cloud_env.apps.github.tokens import (
     BOTICORN_EMAIL,
     BOTICORN_NAME,
     TOKEN_REFRESH_AFTER,
     TOKEN_RETRY_AFTER,
+    GitHubApp,
     github_apps,
     github_token,
     refresh_github_tokens,
@@ -122,25 +122,12 @@ class GitHubTests(unittest.TestCase):
                 self.assertNotIn("stale", text)
                 self.assertIn(str(identity_dir / "dvcrn"), text)
 
-                agy_lines = use_github_directly(
-                    apps,
-                    None,
-                    bypass_proxy=False,
-                    token_dir=tmp / "tok1",
-                    shim=tmp / "bin/gh",
-                    script=tmp / "bootstrap.py",
-                )
-                self.assertEqual(agy_lines, ["unset GH_TOKEN GITHUB_TOKEN"])
+            self.assertEqual(github_env_lines(bypass_proxy=False), ["unset GH_TOKEN GITHUB_TOKEN"])
 
-                with mock.patch.dict(os.environ, {"NO_PROXY": "localhost"}, clear=False):
-                    claude_lines = use_github_directly(
-                        apps,
-                        None,
-                        bypass_proxy=True,
-                        token_dir=tmp / "tok2",
-                        shim=tmp / "bin2/gh",
-                        script=tmp / "bootstrap.py",
-                    )
-                    self.assertIn("api.github.com", os.environ["NO_PROXY"])
-                self.assertEqual(len(claude_lines), 3)
-                self.assertTrue(claude_lines[0].startswith("export NO_PROXY="))
+            with mock.patch.dict(os.environ, {"NO_PROXY": "localhost"}, clear=False):
+                bypass_proxy_for_github()
+                self.assertIn("api.github.com", os.environ["NO_PROXY"])
+            claude_lines = github_env_lines(bypass_proxy=True)
+            self.assertEqual(len(claude_lines), 3)
+            self.assertTrue(claude_lines[0].startswith("export NO_PROXY="))
+            self.assertEqual(claude_lines[-1], "unset GH_TOKEN GITHUB_TOKEN")

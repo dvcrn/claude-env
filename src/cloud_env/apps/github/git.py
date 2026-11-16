@@ -6,11 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cloud_env.apps.github.prompts import GitHubApp
-from cloud_env.apps.github.tokens import GITHUB_OWNER, TOKEN_DIR, github_token
-from cloud_env.config import HOME
+from cloud_env.apps.github.tokens import GITHUB_OWNER, TOKEN_DIR, GitHubApp, github_token
+from cloud_env.config import HOME, hook_command
 from cloud_env.harness import SCRIPT
-from cloud_env.lib.log import hook_command, log, run
+from cloud_env.lib.log import log, run
 
 # One git config file per owner with the commit identity of that owner's GitHub App
 GIT_IDENTITY_DIR = HOME / ".config" / "git" / "github-apps"
@@ -76,12 +75,12 @@ def origin_owner(path: str) -> str | None:
     return repo_owner(url)
 
 
-def configure_git_credentials(script: Path = SCRIPT) -> None:
+def configure_git_credentials() -> None:
     # The empty helper drops ones configured earlier
     key = "credential.https://github.com.helper"
     subprocess.run(["git", "config", "--global", "--unset-all", key], capture_output=True)
     run(["git", "config", "--global", "--add", key, ""], "[git] ")
-    run(["git", "config", "--global", "--add", key, "!" + hook_command("git-credential", script)], "[git] ")  # fmt: skip
+    run(["git", "config", "--global", "--add", key, "!" + hook_command("git-credential", SCRIPT)], "[git] ")  # fmt: skip
     run(
         ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"],
         "[git] ",

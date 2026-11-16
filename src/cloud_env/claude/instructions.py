@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from cloud_env.apps.github.prompts import GitHubApp, github_identity_context
+from cloud_env.apps.github.prompts import github_identity_context
+from cloud_env.apps.github.tokens import GitHubApp
 from cloud_env.lib.fs import load_asset
 
 CLAUDE_MD = load_asset(__file__, "CLAUDE.md")
 
 
 def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global CLAUDE.md, with the GitHub identity rules for the GitHub App owners."""
     if not apps:
         return CLAUDE_MD + (
             "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "

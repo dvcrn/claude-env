@@ -4,9 +4,8 @@ import re
 import shlex
 from pathlib import Path
 
-from cloud_env.config import tools_path
+from cloud_env.config import hook_command, tools_path
 from cloud_env.lib.fs import replace_marked_block
-from cloud_env.lib.log import hook_command
 
 
 # Antigravity runs every command in a non-interactive bash shell with BASH_ENV=~/.bashrc

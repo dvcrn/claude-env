@@ -18,8 +18,8 @@ GLOBAL_TOOLS = load_asset(__file__, "global_tools.toml")
 REPO_MISE_CONFIGS = ("mise.toml", ".mise.toml", ".config/mise.toml", ".tool-versions")
 
 
-def install_mise(work: Path, arch: str, home: Path = HOME) -> None:
-    dest = home / ".local" / "bin" / "mise"
+def install_mise(work: Path, arch: str) -> None:
+    dest = HOME / ".local" / "bin" / "mise"
     if dest.is_file():
         current = subprocess.run([str(dest), "--version"], capture_output=True, text=True)
         if current.returncode == 0 and MISE_VERSION in current.stdout:
@@ -48,14 +48,14 @@ def install_mise(work: Path, arch: str, home: Path = HOME) -> None:
         shutil.copyfileobj(member, out)
     dest.chmod(0o755)
     if os.access("/etc/profile.d", os.W_OK):
-        Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{tools_path(home)}:$PATH"\n')
+        Path("/etc/profile.d/mise.sh").write_text(f'export PATH="{tools_path()}:$PATH"\n')
 
 
-def install_global_tools(home: Path = HOME) -> None:
-    config = home / ".config" / "mise" / "config.toml"
+def install_global_tools() -> None:
+    config = HOME / ".config" / "mise" / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(GLOBAL_TOOLS)
-    subprocess.run(["mise", "install", "--yes"], cwd=home, check=True)
+    subprocess.run(["mise", "install", "--yes"], cwd=HOME, check=True)
 
 
 def repo_mise_projects(candidates: list[Path] | None = None) -> list[Path]:

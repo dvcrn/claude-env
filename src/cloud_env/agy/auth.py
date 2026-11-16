@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+from cloud_env.config import HOME
 from cloud_env.lib.log import log
 from cloud_env.lib.parse import clean_text
 
@@ -30,3 +32,12 @@ def broker_token_headers(token_file: Path) -> dict[str, str]:
         log(f"broker: missing CF-Access-Client-Id or CF-Access-Client-Secret in {token_file}")
         return {}
     return {"CF-Access-Client-Id": client_id, "CF-Access-Client-Secret": client_secret}
+
+
+def agy_broker_headers(
+    token_file: Path = HOME / ".gemini" / ".broker" / "token",
+) -> dict[str, str]:
+    return {
+        "X-Session-Id": os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""),
+        **broker_token_headers(token_file),
+    }

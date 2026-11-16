@@ -40,13 +40,13 @@ def verify_signature(script: Path, sig: Path, allowed_signers: Path) -> bool:
     ]  # fmt: skip
     try:
         with open(script, "rb") as f:
-            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+            verify_result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
     except OSError as e:
         log(f"update: can't run ssh-keygen ({e})")
         return False
-    if result.returncode != 0:
-        log(f"update: signature check failed: {result.stderr.strip()}")
-    return result.returncode == 0
+    if verify_result.returncode != 0:
+        log(f"update: signature check failed: {verify_result.stderr.strip()}")
+    return verify_result.returncode == 0
 
 
 def self_update(

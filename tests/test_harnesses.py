@@ -10,9 +10,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from cloud_env.agy.auth import agy_broker_headers
 from cloud_env.agy.harness import AgyHarness
-from cloud_env.apps.github.prompts import GitHubApp
+from cloud_env.apps.github.tokens import GitHubApp
 from cloud_env.apps.mise.mise import repo_mise_projects
+from cloud_env.claude.auth import claude_broker_headers
 from cloud_env.claude.harness import ClaudeHarness
 from cloud_env.claude.pre_tool_use import cmd_pre_tool_use, has_footer, strip_footer
 
@@ -28,7 +30,7 @@ class HarnessTests(unittest.TestCase):
             )
             token_file.write_text(f"sk-ant-si-{header}.{payload}.sig123\n", encoding="utf-8")
 
-            harness = ClaudeHarness(home=tmp, ingress_token_file=token_file)
+            harness = ClaudeHarness(home=tmp)
             settings_path = harness.claude_dir / "settings.json"
             harness.claude_dir.mkdir(parents=True)
             settings_path.write_text(json.dumps({"customKey": True}), encoding="utf-8")
@@ -43,7 +45,7 @@ class HarnessTests(unittest.TestCase):
             expected_digest = hashlib.sha256(f"{header}.{payload}".encode()).hexdigest()
             with mock.patch.dict(os.environ, {"CLAUDE_CODE_REMOTE_SESSION_ID": "cse_abc"}):
                 self.assertEqual(
-                    harness.broker_headers(),
+                    claude_broker_headers(token_file),
                     {
                         "X-Session-Id": "cse_abc",
                         "X-Ingress-Sig-Sample": f"k1.{expected_digest}.sig123",
@@ -103,14 +105,15 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("_CLOUD_ENV_LOADED=1", bashrc)
             self.assertTrue(harness.gemini_md.is_file())
 
-            harness.broker_token_file.parent.mkdir(parents=True, exist_ok=True)
-            harness.broker_token_file.write_text(
+            broker_token_file = home / ".gemini" / ".broker" / "token"
+            broker_token_file.parent.mkdir(parents=True, exist_ok=True)
+            broker_token_file.write_text(
                 json.dumps({"CF-Access-Client-Id": "id1", "CF-Access-Client-Secret": "sec1"}),
                 encoding="utf-8",
             )
             with mock.patch.dict(os.environ, {"ANTIGRAVITY_CONVERSATION_ID": "conv-1"}):
                 self.assertEqual(
-                    harness.broker_headers(),
+                    agy_broker_headers(broker_token_file),
                     {
                         "X-Session-Id": "conv-1",
                         "CF-Access-Client-Id": "id1",

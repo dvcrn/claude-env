@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 import tempfile
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
 from cloud_env.lib.fs import atomic_write, replace_marked_block
 from cloud_env.secrets.broker import fetch_broker_env
 from cloud_env.secrets.loader import SESSION_ENV_EXCLUDED, load_secrets
+from cloud_env.secrets.onepassword import load_1password
+from tests.helpers import local_http_server
 
 
 class LibAndSecretsTests(unittest.TestCase):
@@ -48,24 +48,11 @@ class LibAndSecretsTests(unittest.TestCase):
         captured_headers: dict[str, str] = {}
         payload: dict[str, object] = {"env": {"LINEAR_API_KEY": "lin_123"}}
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                captured_headers.update({k.lower(): v for k, v in self.headers.items()})
-                body = json.dumps(payload).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+        def respond(_path: str, headers: dict[str, str]) -> tuple[int, bytes, str]:
+            captured_headers.update(headers)
+            return 200, json.dumps(payload).encode("utf-8"), "application/json"
 
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            url = f"http://127.0.0.1:{server.server_port}"
+        with local_http_server(respond) as url:
             env = fetch_broker_env(
                 broker_url=url,
                 auth_headers={"X-Session-Id": "sess-1", "CF-Access-Client-Id": "cid"},
@@ -82,9 +69,10 @@ class LibAndSecretsTests(unittest.TestCase):
             ):
                 payload["env"] = bad_env
                 self.assertIsNone(fetch_broker_env(broker_url=url, auth_headers={}))
-        finally:
-            server.shutdown()
-            server.server_close()
+
+    def test_load_1password_missing_mise_returns_none(self) -> None:
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("mise")):
+            self.assertIsNone(load_1password("ops_tok", "env_id"))
 
     def test_load_secrets_merges_broker_over_1password(self) -> None:
         broker_data = {

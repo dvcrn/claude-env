@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from cloud_env.agy.auth import broker_token_headers
 from cloud_env.agy.bashrc import write_antigravity_bashrc
 from cloud_env.agy.instructions import render_gemini_md, write_gemini_md
-from cloud_env.apps.github.prompts import GitHubApp
+from cloud_env.apps.github.tokens import GitHubApp
 from cloud_env.config import HOME, SHM_DIR
 from cloud_env.lib.fs import atomic_write
 
@@ -26,7 +24,6 @@ class AgyHarness:
         self.attempt_marker = shm_dir / ".cloud-env-attempted"
         self.session_lock = shm_dir / ".cloud-env-session.lock"
         self.gemini_md = home / ".gemini" / "GEMINI.md"
-        self.broker_token_file = home / ".gemini" / ".broker" / "token"
 
     def setup(self) -> None:
         write_antigravity_bashrc(self.home, self.script, self.attempt_marker, self.env_file)
@@ -42,12 +39,6 @@ class AgyHarness:
                 yield
             finally:
                 self.attempt_marker.touch()
-
-    def broker_headers(self) -> dict[str, str]:
-        return {
-            "X-Session-Id": os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""),
-            **broker_token_headers(self.broker_token_file),
-        }
 
     def env_preamble(self) -> list[str]:
         return []

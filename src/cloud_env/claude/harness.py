@@ -4,8 +4,7 @@ import contextlib
 import os
 from pathlib import Path
 
-from cloud_env.apps.github.prompts import GitHubApp
-from cloud_env.claude.auth import INGRESS_TOKEN_FILE, ingress_sig_sample
+from cloud_env.apps.github.tokens import GitHubApp
 from cloud_env.claude.instructions import render_claude_md
 from cloud_env.claude.settings import write_claude_settings
 from cloud_env.config import HOME, tools_path
@@ -17,12 +16,11 @@ class ClaudeHarness:
     bypass_github_proxy = True
     supports_tailscale = True
 
-    def __init__(self, home: Path = HOME, ingress_token_file: Path = INGRESS_TOKEN_FILE) -> None:
+    def __init__(self, home: Path = HOME) -> None:
         self.home = home
         self.claude_dir = home / ".claude"
         self.install_dir = self.claude_dir / "hooks" / "claude-env"
         self.script = self.install_dir / "bootstrap.py"
-        self.ingress_token_file = ingress_token_file
 
     def setup(self) -> None:
         self.claude_dir.mkdir(parents=True, exist_ok=True)
@@ -31,12 +29,6 @@ class ClaudeHarness:
 
     def session_context(self) -> contextlib.AbstractContextManager[None]:
         return contextlib.nullcontext()
-
-    def broker_headers(self) -> dict[str, str]:
-        headers = {"X-Session-Id": os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "")}
-        if sample := ingress_sig_sample(self.ingress_token_file):
-            headers["X-Ingress-Sig-Sample"] = sample
-        return headers
 
     def env_preamble(self) -> list[str]:
         return [f'export PATH="{tools_path(self.home)}:$PATH"']

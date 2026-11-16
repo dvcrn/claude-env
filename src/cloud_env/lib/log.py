@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import shlex
 import subprocess
-import sys
 import threading
 import time
-from pathlib import Path
 
 _log_lock = threading.Lock()
 
@@ -17,7 +14,6 @@ def log(message: str, prefix: str = "") -> None:
 
 
 def run(cmd: list[str], prefix: str = "", cwd: str | None = None) -> bool:
-    """Runs cmd, logging its combined output line by line under prefix."""
     try:
         proc = subprocess.Popen(
             cmd,
@@ -38,7 +34,3 @@ def run(cmd: list[str], prefix: str = "", cwd: str | None = None) -> bool:
     if code:
         log(f"{cmd[0]} exited with {code}", prefix)
     return code == 0
-
-
-def hook_command(subcommand: str, script: Path) -> str:
-    return f"{shlex.quote(sys.executable)} -I {shlex.quote(str(script))} {subcommand}"

@@ -8,17 +8,16 @@ from pathlib import Path
 
 from cloud_env.apps.github.git import origin_owner, repo_owner
 from cloud_env.apps.github.tokens import github_token
-from cloud_env.config import HOME
+from cloud_env.config import HOME, hook_command
 from cloud_env.harness import SCRIPT
 from cloud_env.lib.fs import atomic_write
-from cloud_env.lib.log import hook_command
 
-# Ahead of the mise shim on TOOLS_PATH
+# Ahead of the mise shims in tools_path()
 GH_SHIM = HOME / ".local" / "bin" / "gh"
 
 
-def install_gh_shim(shim: Path = GH_SHIM, script: Path = SCRIPT) -> None:
-    atomic_write(shim, f'#!/bin/sh\nexec {hook_command("gh", script)} "$@"\n', mode=0o755)
+def install_gh_shim() -> None:
+    atomic_write(GH_SHIM, f'#!/bin/sh\nexec {hook_command("gh", SCRIPT)} "$@"\n', mode=0o755)
 
 
 def gh_target_owner(args: list[str]) -> str | None:

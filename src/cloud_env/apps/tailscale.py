@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 
 from cloud_env.config import SHM_DIR
-from cloud_env.harness import HARNESS
 from cloud_env.lib.log import log, run
 
 TAILSCALED_LOG = Path("/tmp/tailscaled.log")
@@ -21,9 +20,9 @@ def tailscaled_running() -> bool:
     return subprocess.run(["pgrep", "-x", "tailscaled"], capture_output=True).returncode == 0
 
 
-def tailscale_needs_rejoin(marker: Path = TAILSCALE_MARKER) -> bool:
+def tailscale_needs_rejoin() -> bool:
     """Whether this VM joined Tailscale earlier and tailscaled has since died."""
-    return marker.exists() and not tailscaled_running()
+    return TAILSCALE_MARKER.exists() and not tailscaled_running()
 
 
 # tailscaled inherits HTTPS_PROXY, which is what lets it reach the control plane. In-memory
@@ -47,12 +46,8 @@ def start_tailscaled(prefix: str) -> None:
     log(f"tailscaled socket did not appear after 10s, see {TAILSCALED_LOG}", prefix)
 
 
-def join_tailscale(authkey: str | None, *, supported: bool | None = None) -> None:
+def join_tailscale(authkey: str | None) -> None:
     prefix = "[tailscale] "
-    # Antigravity's sandbox netns only exposes lo, so tailscaled's netmon pauses control login
-    if not (HARNESS.supports_tailscale if supported is None else supported):
-        log("unsupported in Antigravity sandbox, skipping", prefix)
-        return
     if not shutil.which("tailscaled"):
         log("not installed, skipping", prefix)
         return

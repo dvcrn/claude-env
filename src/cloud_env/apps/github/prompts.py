@@ -1,32 +1,8 @@
 from __future__ import annotations
 
 import shlex
-from typing import NamedTuple
 
-
-class GitHubApp(NamedTuple):
-    """An owner's GitHub App installation token and the identity its commits use."""
-
-    token: str
-    name: str
-    email: str
-
-
-# The proxied GitHub MCP server appends the footer after this hook runs, so these tools are
-# denied and posts go through gh
-PROXIED_GITHUB_WRITES = tuple(
-    f"mcp__github__{name}"
-    for name in (
-        "add_comment_to_pending_review",
-        "add_issue_comment",
-        "add_reply_to_pull_request_comment",
-        "create_pull_request",
-        "issue_write",
-        "pull_request_review_write",
-        "update_issue_comment",
-        "update_pull_request",
-    )
-)
+from cloud_env.apps.github.tokens import GitHubApp
 
 
 def github_identity_context(

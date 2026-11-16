@@ -12,6 +12,7 @@ from pathlib import Path
 
 from cloud_env.config import VERSION
 from cloud_env.update import install_self, script_version, verify_signature
+from tests.helpers import generate_signing_key, sign_script
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -103,31 +104,60 @@ class BuildTests(unittest.TestCase):
 
             reset_repo()
             (base / "bootstrap.py").write_text("# drifted\n", encoding="utf-8")
-            self.assertNotEqual(run_build("--check").returncode, 0)
+            drift = run_build("--check")
+            self.assertNotEqual(drift.returncode, 0)
+            self.assertIn("out of date", drift.stderr)
 
             reset_repo()
-            with (base / "src/cloud_env/apps/linear.py").open("a", encoding="utf-8") as f:
+            parse_py = base / "src/cloud_env/lib/parse.py"
+            parse_py.write_text(
+                "from __future__ import annotations\n\nimport urllib.error\n\n"
+                "def clean_text(value: object) -> bool:\n"
+                "    return isinstance(value, str) and bool(value) and not isinstance(value, urllib.error.URLError)\n",
+                encoding="utf-8",
+            )
+            multi_submod = run_build()
+            self.assertEqual(multi_submod.returncode, 0, multi_submod.stderr)
+
+            reset_repo()
+            with (base / "src/cloud_env/lib/parse.py").open("a", encoding="utf-8") as f:
+                f.write("\nimport urllib.error as req\n_ = req\n")
+            with (base / "src/cloud_env/lib/http.py").open("a", encoding="utf-8") as f:
+                f.write("\nimport urllib.request as req\n_ = req\n")
+            alias_conflict = run_build()
+            self.assertNotEqual(alias_conflict.returncode, 0)
+            self.assertIn("conflicting stdlib import binding 'req'", alias_conflict.stderr)
+
+            reset_repo()
+            with (base / "src/cloud_env/lib/parse.py").open("a", encoding="utf-8") as f:
+                f.write("\nfrom .fs import atomic_write\n")
+            rel_import = run_build()
+            self.assertNotEqual(rel_import.returncode, 0)
+            self.assertIn("relative imports are not supported", rel_import.stderr)
+
+            reset_repo()
+            with (base / "src/cloud_env/lib/parse.py").open("a", encoding="utf-8") as f:
                 f.write("\nVERSION = 99\n")
             dup = run_build()
             self.assertNotEqual(dup.returncode, 0)
             self.assertIn("duplicate top-level symbol 'VERSION'", dup.stderr)
 
             reset_repo()
-            with (base / "src/cloud_env/apps/linear.py").open("a", encoding="utf-8") as f:
+            with (base / "src/cloud_env/lib/parse.py").open("a", encoding="utf-8") as f:
                 f.write("\nPath = 123\n")
             shadow = run_build()
             self.assertNotEqual(shadow.returncode, 0)
             self.assertIn("shadows stdlib import", shadow.stderr)
 
             reset_repo()
-            with (base / "src/cloud_env/apps/linear.py").open("a", encoding="utf-8") as f:
+            with (base / "src/cloud_env/lib/parse.py").open("a", encoding="utf-8") as f:
                 f.write("\nimport third_party_pkg\n")
             third = run_build()
             self.assertNotEqual(third.returncode, 0)
             self.assertIn("non-stdlib import", third.stderr)
 
             reset_repo()
-            with (base / "src/cloud_env/apps/linear.py").open("a", encoding="utf-8") as f:
+            with (base / "src/cloud_env/lib/parse.py").open("a", encoding="utf-8") as f:
                 f.write("\ndef bad() -> None:\n    from cloud_env.config import VERSION\n")
             nested = run_build()
             self.assertNotEqual(nested.returncode, 0)
@@ -176,18 +206,10 @@ class BuildTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
-            key = tmp / "id_ed25519"
-            subprocess.run(
-                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
-                check=True,
-            )
+            key, pub = generate_signing_key(tmp)
             script = tmp / "bootstrap.py"
             shutil.copy(ROOT / "bootstrap.py", script)
-            subprocess.run(
-                ["ssh-keygen", "-q", "-Y", "sign", "-f", str(key), "-n", "claude-env", str(script)],
-                check=True,
-            )
-            pub = key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+            sign_script(key, script)
             install_dir = tmp / "installed"
             install_self(pub, source_script=script, install_dir=install_dir)
             self.assertTrue(

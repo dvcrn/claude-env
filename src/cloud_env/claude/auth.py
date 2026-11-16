@@ -28,3 +28,10 @@ def ingress_sig_sample(token_file: Path = INGRESS_TOKEN_FILE) -> str | None:
         return None
     digest = hashlib.sha256(f"{header}.{payload}".encode()).hexdigest()
     return f"{kid}.{digest}.{signature}"
+
+
+def claude_broker_headers(token_file: Path = INGRESS_TOKEN_FILE) -> dict[str, str]:
+    headers = {"X-Session-Id": os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "")}
+    if sample := ingress_sig_sample(token_file):
+        headers["X-Ingress-Sig-Sample"] = sample
+    return headers
