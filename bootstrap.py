@@ -107,6 +107,20 @@ def download(url: str, dest: Path, timeout: float = 60) -> None:
         shutil.copyfileobj(resp, f)
 
 
+def atomic_write(path: Path, text: str, mode: int | None = None) -> None:
+    """Replaces path with text in one step, through a temporary file only the user can read."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            if mode is not None:
+                os.fchmod(fd, mode)
+        os.replace(tmp, path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def replace_marked_block(existing: str, lines: list[str]) -> str:
     kept = re.sub(r"(?ms)^# >>> cloud-env\n.*?^# <<< cloud-env(\n|\Z)", "", existing)
     if kept and not kept.endswith("\n"):
@@ -365,18 +379,22 @@ def boticorn_entry(token: object) -> GitHubApp | None:
     return GitHubApp(token, BOTICORN_NAME, BOTICORN_EMAIL) if clean_text(token) else None
 
 
+def git_config(*args: str) -> bool:
+    return run(["git", "config", "--global", *args], "[git] ")
+
+
 # The harness writes user.name=Claude into ~/.gitconfig. The user's identity from 1Password is
 # the global default, and repos of an owner with a GitHub App commit as that app.
 def set_git_identity(apps: dict[str, GitHubApp]) -> None:
     name, email = os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL")
     if name and email:
-        run(["git", "config", "--global", "user.name", name], "[git] ")
-        run(["git", "config", "--global", "user.email", email], "[git] ")
+        git_config("user.name", name)
+        git_config("user.email", email)
     else:
         log("git: no GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL, keeping the existing identity")
     # The harness signing key is registered to noreply@anthropic.com, and while signing is on its
     # Stop hook asks for every other committer's commits to be rewritten to that address
-    run(["git", "config", "--global", "commit.gpgsign", "false"], "[git] ")
+    git_config("commit.gpgsign", "false")
 
     if not apps:
         log("git: no GitHub App tokens, keeping the app identity config from earlier starts")
@@ -401,8 +419,7 @@ def set_git_identity(apps: dict[str, GitHubApp]) -> None:
         # `**/<owner>/**` also matches the agent proxy's http://127.0.0.1:<port>/git/<owner>/<repo>.
         # git only supports `remote.*.url` here, so any remote on the owner counts, upstream too.
         for pattern in (f"**/{owner}/**", f"git@github.com:{owner}/**"):
-            key = f"includeIf.hasconfig:remote.*.url:{pattern}.path"
-            run(["git", "config", "--global", key, str(path)], "[git] ")
+            git_config(f"includeIf.hasconfig:remote.*.url:{pattern}.path", str(path))
 
 
 def repo_owner(repo: str) -> str | None:
@@ -419,23 +436,15 @@ def origin_owner(path: str) -> str | None:
     return repo_owner(url)
 
 
-def write_token(name: str, token: str) -> None:
-    tmp = TOKEN_DIR / f".{name}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(token)
-    os.replace(tmp, TOKEN_DIR / name)
-
-
 def store_github_tokens(apps: dict[str, GitHubApp], default: str | None) -> None:
     """Writes the token files. Tokens of owners missing from apps are kept: they still work
     until they expire."""
     TOKEN_DIR.mkdir(mode=0o700, exist_ok=True)
     TOKEN_DIR.chmod(0o700)
     for owner, app in apps.items():
-        write_token(owner, app.token)
+        atomic_write(TOKEN_DIR / owner, app.token)
     if default:
-        write_token(DEFAULT_TOKEN, default)
+        atomic_write(TOKEN_DIR / DEFAULT_TOKEN, default)
     if apps:
         TOKEN_STAMP.touch()
 
@@ -447,10 +456,7 @@ def bypass_proxy_for_github() -> None:
 
 def install_gh_shim() -> None:
     GH_SHIM.parent.mkdir(parents=True, exist_ok=True)
-    tmp = GH_SHIM.with_name(".gh.tmp")
-    tmp.write_text(f'#!/bin/sh\nexec {hook_command("gh")} "$@"\n')
-    tmp.chmod(0o755)
-    os.replace(tmp, GH_SHIM)
+    atomic_write(GH_SHIM, f'#!/bin/sh\nexec {hook_command("gh")} "$@"\n', mode=0o755)
 
 
 # Claude Code's agent proxy swaps GitHub credentials for a placeholder and only allows the session's
@@ -468,11 +474,9 @@ def use_github_directly(apps: dict[str, GitHubApp], default: str | None) -> list
     # The empty helper drops ones configured earlier
     key = "credential.https://github.com.helper"
     subprocess.run(["git", "config", "--global", "--unset-all", key], capture_output=True)
-    run(["git", "config", "--global", "--add", key, ""], "[git] ")
-    run(["git", "config", "--global", "--add", key, "!" + hook_command("git-credential")], "[git] ")
-    run(
-        ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"], "[git] "
-    )
+    git_config("--add", key, "")
+    git_config("--add", key, "!" + hook_command("git-credential"))
+    git_config("credential.https://github.com.useHttpPath", "true")
     log(f"github: app tokens for {' '.join(sorted(apps)) or 'no owners'}")
     lines = []
     if not ANTIGRAVITY:
@@ -1045,16 +1049,11 @@ def write_gemini_md(content: str) -> None:
         if GEMINI_MD.read_text() == content:
             return
     GEMINI_MD.parent.mkdir(parents=True, exist_ok=True)
-    # /shared/user/.gemini is virtiofs mapped to nobody:nogroup, so chmod raises EPERM
-    fd, tmp_name = tempfile.mkstemp(dir=GEMINI_MD.parent, prefix=".GEMINI.md.")
-    tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.replace(tmp, GEMINI_MD)
+        # No mode: /shared/user/.gemini is virtiofs mapped to nobody:nogroup, so chmod raises EPERM
+        atomic_write(GEMINI_MD, content)
     except OSError as e:
         log(f"gemini-md: write failed ({e})")
-        tmp.unlink(missing_ok=True)
 
 
 # --- install and self-update ----------------------------------------------------------------
@@ -1157,11 +1156,7 @@ def cmd_setup() -> int:
 def write_env_block(lines: list[str]) -> bool:
     """Writes the session env: to /dev/shm on Antigravity, or a marked block in $CLAUDE_ENV_FILE."""
     if ANTIGRAVITY:
-        tmp = ANTIGRAVITY_ENV_FILE.with_name(f".{ANTIGRAVITY_ENV_FILE.name}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write("\n".join(lines) + "\n")
-        os.replace(tmp, ANTIGRAVITY_ENV_FILE)
+        atomic_write(ANTIGRAVITY_ENV_FILE, "\n".join(lines) + "\n")
         return True
     if not (env_file := os.environ.get("CLAUDE_ENV_FILE")):
         log("env: CLAUDE_ENV_FILE is not set, the session won't see the loaded variables")
@@ -1257,21 +1252,20 @@ def cmd_session_start(update: bool) -> int:
     return 0
 
 
+COMMANDS = {
+    "setup": lambda args: cmd_setup(),
+    "session-start": lambda args: cmd_session_start(update="--no-update" not in args),
+    "pre-tool-use": lambda args: cmd_pre_tool_use(),
+    "git-credential": cmd_git_credential,
+    "gh": cmd_gh,
+}
+
+
 def main() -> int:
-    args = sys.argv[1:]
-    if args[:1] == ["setup"]:
-        return cmd_setup()
-    if args[:1] == ["session-start"]:
-        return cmd_session_start(update="--no-update" not in args)
-    if args[:1] == ["pre-tool-use"]:
-        return cmd_pre_tool_use()
-    if args[:1] == ["git-credential"]:
-        return cmd_git_credential(args[1:])
-    if args[:1] == ["gh"]:
-        return cmd_gh(args[1:])
-    sys.exit(
-        "usage: bootstrap.py setup | session-start [--no-update] | pre-tool-use | git-credential"
-    )
+    name, *args = sys.argv[1:] or [""]
+    if command := COMMANDS.get(name):
+        return command(args)
+    sys.exit(f"usage: bootstrap.py {' | '.join(COMMANDS)}")
 
 
 if __name__ == "__main__":

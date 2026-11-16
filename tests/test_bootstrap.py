@@ -1,9 +1,10 @@
 import json
 import os
+import sys
 import unittest
 from unittest import mock
 
-from helpers import FOOTER, bootstrap
+from helpers import FOOTER, TempDirTest, bootstrap
 
 
 class GitHubAppsTest(unittest.TestCase):
@@ -77,6 +78,39 @@ class ReplaceMarkedBlockTest(unittest.TestCase):
         once = bootstrap.replace_marked_block("alias ll='ls -l'", ["export A=1"])
         twice = bootstrap.replace_marked_block(once, ["export A=2"])
         self.assertEqual(twice, "alias ll='ls -l'\n# >>> cloud-env\nexport A=2\n# <<< cloud-env\n")
+
+
+class AtomicWriteTest(TempDirTest):
+    def test_replaces_the_file_and_leaves_no_temporary_file(self) -> None:
+        path = self.tmp / "token"
+        bootstrap.atomic_write(path, "old")
+        bootstrap.atomic_write(path, "new")
+        self.assertEqual(path.read_text(), "new")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.tmp.iterdir()), [path])
+
+    def test_applies_the_mode(self) -> None:
+        bootstrap.atomic_write(self.tmp / "gh", "#!/bin/sh\n", mode=0o755)
+        self.assertEqual((self.tmp / "gh").stat().st_mode & 0o777, 0o755)
+
+
+class MainTest(unittest.TestCase):
+    def test_runs_the_named_command_with_the_remaining_arguments(self) -> None:
+        command = mock.Mock(return_value=3)
+        with (
+            mock.patch.dict(bootstrap.COMMANDS, {"gh": command}),
+            mock.patch.object(sys, "argv", ["bootstrap.py", "gh", "pr", "view"]),
+        ):
+            self.assertEqual(bootstrap.main(), 3)
+        command.assert_called_once_with(["pr", "view"])
+
+    def test_unknown_or_missing_command_exits_with_the_usage(self) -> None:
+        for argv in (["bootstrap.py"], ["bootstrap.py", "nope"]):
+            with self.subTest(argv=argv), mock.patch.object(sys, "argv", argv):
+                with self.assertRaises(SystemExit) as raised:
+                    bootstrap.main()
+                for name in ("setup", "session-start", "pre-tool-use", "git-credential", "gh"):
+                    self.assertIn(name, raised.exception.code)
 
 
 class ScriptVersionTest(unittest.TestCase):
