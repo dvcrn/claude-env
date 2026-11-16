@@ -17,20 +17,21 @@ IDENTITY = ("Ada Lovelace", "ada@example.com")
 
 class InstructionsTest(unittest.TestCase):
     def test_github_identity_rules_follow_the_base_instructions(self) -> None:
-        renderers = [
-            ("claude", bootstrap.render_claude_md, bootstrap.CLAUDE_MD),
-            ("gemini", bootstrap.render_gemini_md, bootstrap.GEMINI_BASE_MD),
+        harnesses = [
+            ("claude", bootstrap.CLAUDE_INSTRUCTIONS),
+            ("gemini", bootstrap.GEMINI_INSTRUCTIONS),
         ]
         cases = [
             ("apps", APPS, IDENTITY),
             ("apps_without_identity", APPS, None),
             ("without_apps", {}, None),
         ]
-        for harness, render, base in renderers:
+        for harness, instructions in harnesses:
             for case, apps, identity in cases:
                 with self.subTest(harness=harness, case=case):
-                    want = base + (GOLDEN / f"{harness}_{case}.md").read_text()
-                    self.assertEqual(render(apps, identity), want)
+                    want = instructions.base + (GOLDEN / f"{harness}_{case}.md").read_text()
+                    rendered = bootstrap.render_instructions(instructions, apps, identity)
+                    self.assertEqual(rendered, want)
 
 
 class ClaudeSettingsTest(TempDirTest):
@@ -130,9 +131,12 @@ class ClaudeCodeTest(TempDirTest):
     def test_resume_without_apps_keeps_the_instructions(self) -> None:
         claude_md = self.tmp / "CLAUDE.md"
         self.harness.write_instructions({}, None, resuming=False)
-        self.assertEqual(claude_md.read_text(), bootstrap.render_claude_md({}, None))
+        self.assertEqual(
+            claude_md.read_text(),
+            bootstrap.render_instructions(bootstrap.CLAUDE_INSTRUCTIONS, {}, None),
+        )
         self.harness.write_instructions(APPS, IDENTITY, resuming=True)
-        with_apps = bootstrap.render_claude_md(APPS, IDENTITY)
+        with_apps = bootstrap.render_instructions(bootstrap.CLAUDE_INSTRUCTIONS, APPS, IDENTITY)
         self.assertEqual(claude_md.read_text(), with_apps)
         self.harness.write_instructions({}, None, resuming=True)
         self.assertEqual(claude_md.read_text(), with_apps)
@@ -155,7 +159,10 @@ class AntigravityTest(TempDirTest):
     def test_setup_writes_the_bashrc_block_and_the_first_instructions(self) -> None:
         self.harness.setup()
         self.assertIn("# >>> cloud-env\n", (self.tmp / ".bashrc").read_text())
-        self.assertEqual(self.gemini_md.read_text(), bootstrap.render_gemini_md({}, None))
+        self.assertEqual(
+            self.gemini_md.read_text(),
+            bootstrap.render_instructions(bootstrap.GEMINI_INSTRUCTIONS, {}, None),
+        )
 
         self.gemini_md.write_text("from another VM")
         self.harness.setup()
@@ -163,7 +170,7 @@ class AntigravityTest(TempDirTest):
 
     def test_instructions_are_only_replaced_with_apps(self) -> None:
         self.harness.write_instructions(APPS, IDENTITY, resuming=False)
-        with_apps = bootstrap.render_gemini_md(APPS, IDENTITY)
+        with_apps = bootstrap.render_instructions(bootstrap.GEMINI_INSTRUCTIONS, APPS, IDENTITY)
         self.assertEqual(self.gemini_md.read_text(), with_apps)
         self.harness.write_instructions({}, None, resuming=False)
         self.assertEqual(self.gemini_md.read_text(), with_apps)

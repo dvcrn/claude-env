@@ -138,7 +138,10 @@ class SessionStartTest(TempDirTest):
         bootstrap.set_git_identity.assert_called_once_with(None, {})
         bootstrap.use_github_directly.assert_called_once_with({}, None)
         bootstrap.join_tailscale.assert_called_once_with(None)
-        self.assertEqual(self.claude_md.read_text(), bootstrap.render_claude_md({}, None))
+        self.assertEqual(
+            self.claude_md.read_text(),
+            bootstrap.render_instructions(bootstrap.CLAUDE_INSTRUCTIONS, {}, None),
+        )
         self.assertFalse(self.marker.exists())
 
     def test_failed_1password_keeps_the_broker_secrets_and_retries_next_start(self) -> None:
@@ -196,7 +199,9 @@ class SetupTest(TempDirTest):
         settings = json.loads((bootstrap.CLAUDE_DIR / "settings.json").read_text())
         self.assertEqual(set(settings["hooks"]), {"SessionStart", "PreToolUse"})
         claude_md = (bootstrap.CLAUDE_DIR / "CLAUDE.md").read_text()
-        self.assertEqual(claude_md, bootstrap.render_claude_md({}, None))
+        self.assertEqual(
+            claude_md, bootstrap.render_instructions(bootstrap.CLAUDE_INSTRUCTIONS, {}, None)
+        )
 
     def test_refuses_to_run_below_the_stub_min_version(self) -> None:
         self.patch_env(SIGNER="ssh-ed25519 AAAA", MIN_VERSION=str(bootstrap.VERSION + 1))

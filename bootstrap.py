@@ -832,9 +832,54 @@ After creating a PR, keep watching it for review activity until it is merged or 
 """
 
 
-def github_identity_context(
-    apps: dict[str, GitHubApp], identity: tuple[str, str] | None
-) -> tuple[str, str, str, str]:
+class Instructions(NamedTuple):
+    """A harness's global instructions file, and how it words posting to GitHub as the user."""
+
+    base: str
+    # Closing rule when the session has no GitHub App tokens
+    without_apps: str
+    # Rule for repos outside the GitHub App owners, with a {user} placeholder
+    other_owners: str
+    # How to post "as me" on a GitHub App owner's repo
+    as_me: str
+
+
+CLAUDE_INSTRUCTIONS = Instructions(
+    base=CLAUDE_MD,
+    without_apps=(
+        "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
+        "write, use the `github` tools of the `dpn` MCP.\n"
+    ),
+    other_owners=(
+        "- On repos of any other owner, create issues, PRs and comments with the `github` tools "
+        "of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.\n"
+    ),
+    as_me="post through the `dpn` MCP too",
+)
+
+# gh with the token of Antigravity's GitHub plugin, which acts as the user
+PLUGIN_GH = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
+GEMINI_INSTRUCTIONS = Instructions(
+    base=GEMINI_BASE_MD,
+    without_apps=(
+        f"- Use `gh` for GitHub. Where its default token can't write, run `{PLUGIN_GH} ...` "
+        "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
+    ),
+    other_owners=(
+        "- On repos of any other owner, commits use {user}'s identity; to create issues, PRs, or "
+        f"comments where `gh`'s default token can't write, run `{PLUGIN_GH} ...` "
+        "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
+    ),
+    as_me=f"post via `{PLUGIN_GH} ...` (or the `dpn` MCP if connected)",
+)
+
+
+def render_instructions(
+    instructions: Instructions, apps: dict[str, GitHubApp], identity: tuple[str, str] | None
+) -> str:
+    """Returns the instructions file, ending with the GitHub identity rules for the app owners."""
+    if not apps:
+        return instructions.base + instructions.without_apps
     owners_by_app: dict[str, list[str]] = {}
     for owner, app in sorted(apps.items()):
         owners_by_app.setdefault(app.name, []).append(f"`{owner}`")
@@ -853,47 +898,15 @@ def github_identity_context(
         )
     else:
         user, co_author, as_me = "the user", "", "commit with the user's identity"
-    return acting, user, co_author, as_me
-
-
-def render_claude_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global CLAUDE.md, with the GitHub identity rules for the GitHub App owners."""
-    if not apps:
-        return CLAUDE_MD + (
-            "- Use `gh` for GitHub. To create issues, PRs or comments where its token can't "
-            "write, use the `github` tools of the `dpn` MCP.\n"
-        )
-    acting, user, co_author, as_me = github_identity_context(apps, identity)
     return (
-        CLAUDE_MD
+        instructions.base
         + acting
         + f"""\
 - Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
 - `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
-- On repos of any other owner, create issues, PRs and comments with the `github` tools of the `dpn` MCP, which act as {user}. Commits there use {user}'s identity.
-- When the user asks to act "as me" on one of those repos, post through the `dpn` MCP too, and {as_me}.
 """
-    )
-
-
-def render_gemini_md(apps: dict[str, GitHubApp], identity: tuple[str, str] | None) -> str:
-    """Returns the global ~/.gemini/GEMINI.md for Antigravity environments."""
-    plugin_gh = 'GH_TOKEN=$(jq -r .access_token "$GITHUB_TOKEN_FILE") gh'
-    if not apps:
-        return GEMINI_BASE_MD + (
-            f"- Use `gh` for GitHub. Where its default token can't write, run `{plugin_gh} ...` "
-            "(when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.\n"
-        )
-    acting, user, co_author, as_me = github_identity_context(apps, identity)
-    return (
-        GEMINI_BASE_MD
-        + acting
-        + f"""\
-- Commits in those repos are authored as their app automatically (`git config user.name` shows it). {co_author}
-- `gh` picks the token of the owner in `--repo`, in a `gh api repos/<owner>/...` path, or of the current directory's `origin` remote. Pass `--repo` when working on a repo outside the current directory. Tokens refresh on their own.
-- On repos of any other owner, commits use {user}'s identity; to create issues, PRs, or comments where `gh`'s default token can't write, run `{plugin_gh} ...` (when `$GITHUB_TOKEN_FILE` is set) or use the `dpn` MCP if connected.
-- When the user asks to act "as me" on one of those repos, post via `{plugin_gh} ...` (or the `dpn` MCP if connected), and {as_me}.
-"""
+        + instructions.other_owners.replace("{user}", user)
+        + f'- When the user asks to act "as me" on one of those repos, {instructions.as_me}, and {as_me}.\n'
     )
 
 
@@ -1047,13 +1060,15 @@ class ClaudeCode:
     def setup(self) -> None:
         CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
         write_claude_settings()
-        (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md({}, None))
+        (CLAUDE_DIR / "CLAUDE.md").write_text(render_instructions(CLAUDE_INSTRUCTIONS, {}, None))
 
     def write_instructions(
         self, apps: dict[str, GitHubApp], identity: tuple[str, str] | None, resuming: bool
     ) -> None:
         if apps or not resuming:
-            (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md(apps, identity))
+            (CLAUDE_DIR / "CLAUDE.md").write_text(
+                render_instructions(CLAUDE_INSTRUCTIONS, apps, identity)
+            )
 
     def write_env(self, lines: list[str]) -> bool:
         """Replaces this script's block in $CLAUDE_ENV_FILE."""
@@ -1133,13 +1148,13 @@ class Antigravity:
     def setup(self) -> None:
         write_antigravity_bashrc()
         if not GEMINI_MD.exists():
-            write_gemini_md(render_gemini_md({}, None))
+            write_gemini_md(render_instructions(GEMINI_INSTRUCTIONS, {}, None))
 
     def write_instructions(
         self, apps: dict[str, GitHubApp], identity: tuple[str, str] | None, resuming: bool
     ) -> None:
         if apps or not GEMINI_MD.exists():
-            write_gemini_md(render_gemini_md(apps, identity))
+            write_gemini_md(render_instructions(GEMINI_INSTRUCTIONS, apps, identity))
 
     def write_env(self, lines: list[str]) -> bool:
         atomic_write(ANTIGRAVITY_ENV_FILE, "\n".join(lines) + "\n")
