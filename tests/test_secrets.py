@@ -111,5 +111,47 @@ class OnePasswordTest(unittest.TestCase):
                 self.assertIsNone(bootstrap.load_1password("ops_1", "env_1"))
 
 
+class LoadSecretsTest(unittest.TestCase):
+    def load(self, broker: dict[str, str] | None, onepassword: dict[str, str] | None):
+        with (
+            mock.patch.object(bootstrap, "log"),
+            mock.patch.object(bootstrap, "fetch_broker_env", return_value=broker),
+            mock.patch.object(bootstrap, "load_1password", return_value=onepassword),
+        ):
+            return bootstrap.load_secrets()
+
+    def test_broker_values_win_and_non_environment_secrets_are_split_off(self) -> None:
+        app = {"token": "ghs_a", "name": "bot[bot]", "email": "bot@example.com"}
+        broker = {
+            "OP_SERVICE_ACCOUNT_TOKEN": "ops_1",
+            "OP_ENVIRONMENT_ID": "env_1",
+            "TS_AUTHKEY": "tskey-1",
+            "GITHUB_APP_TOKENS": json.dumps({"acme": app}),
+            "SHARED": "broker",
+        }
+        secrets = self.load(broker, {"SHARED": "1password", "API_KEY": "abc"})
+        self.assertEqual(secrets.env, {"SHARED": "broker", "API_KEY": "abc"})
+        self.assertEqual(secrets.apps, {"acme": bootstrap.GitHubApp(**app)})
+        self.assertEqual(secrets.tailscale_authkey, "tskey-1")
+        self.assertTrue(secrets.complete)
+
+    def test_incomplete_without_the_broker_or_1password(self) -> None:
+        credentials = {"OP_SERVICE_ACCOUNT_TOKEN": "ops_1", "OP_ENVIRONMENT_ID": "env_1"}
+        cases = [
+            (None, {"API_KEY": "abc"}, {}),
+            ({"A": "1"}, {"API_KEY": "abc"}, {"A": "1"}),
+            ({"A": "1", **credentials}, None, {"A": "1"}),
+        ]
+        for broker, onepassword, env in cases:
+            with self.subTest(broker=broker):
+                self.assertEqual(
+                    self.load(broker, onepassword), bootstrap.Secrets(env, {}, None, False)
+                )
+
+    def test_session_env_lines_quote_values_and_skip_excluded_names(self) -> None:
+        env = {"API_KEY": "a b", "GITHUB_TOKEN": "ghp_1", "GIT_AUTHOR_NAME": "Ada", "N": "1"}
+        self.assertEqual(bootstrap.session_env_lines(env), ["export API_KEY='a b'", "export N=1"])
+
+
 if __name__ == "__main__":
     unittest.main()

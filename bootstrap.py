@@ -279,8 +279,8 @@ def load_1password(token: str, environment_id: str) -> dict[str, str] | None:
     return variables
 
 
-def load_secrets() -> tuple[dict[str, str], bool]:
-    """Returns the session's secrets, and whether both the broker and 1Password delivered."""
+def fetch_secrets() -> tuple[dict[str, str], bool]:
+    """Returns the broker and 1Password variables, and whether both delivered."""
     broker = fetch_broker_env()
     if broker is None:
         log("broker: continuing without secrets")
@@ -296,6 +296,33 @@ def load_secrets() -> tuple[dict[str, str], bool]:
         return broker, False
     # Broker values win, so a broker-minted token replaces a long-lived one from 1Password
     return onepassword | broker, True
+
+
+class Secrets(NamedTuple):
+    """The session's secrets, with the ones that never enter the environment split off."""
+
+    env: dict[str, str]
+    apps: dict[str, GitHubApp]
+    tailscale_authkey: str | None
+    # False when the broker or 1Password failed, so the next start loads them again
+    complete: bool
+
+
+def load_secrets() -> Secrets:
+    env, complete = fetch_secrets()
+    tailscale_authkey = env.pop(TAILSCALE_ONLY, None)
+    apps = github_apps(env)
+    env.pop("GITHUB_APP_TOKENS", None)
+    env.pop("BOTICORN_TOKENS", None)
+    return Secrets(env, apps, tailscale_authkey, complete)
+
+
+def session_env_lines(env: dict[str, str]) -> list[str]:
+    return [
+        f"export {name}={shlex.quote(value)}"
+        for name, value in env.items()
+        if name not in SESSION_ENV_EXCLUDED
+    ]
 
 
 # --- GitHub: app tokens, git identity, and the gh and git credentials -----------------------
@@ -383,13 +410,17 @@ def git_config(*args: str) -> bool:
     return run(["git", "config", "--global", *args], "[git] ")
 
 
+def user_identity() -> tuple[str, str] | None:
+    name, email = os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL")
+    return (name, email) if name and email else None
+
+
 # The harness writes user.name=Claude into ~/.gitconfig. The user's identity from 1Password is
 # the global default, and repos of an owner with a GitHub App commit as that app.
-def set_git_identity(apps: dict[str, GitHubApp]) -> None:
-    name, email = os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL")
-    if name and email:
-        git_config("user.name", name)
-        git_config("user.email", email)
+def set_git_identity(identity: tuple[str, str] | None, apps: dict[str, GitHubApp]) -> None:
+    if identity:
+        git_config("user.name", identity[0])
+        git_config("user.email", identity[1])
     else:
         log("git: no GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL, keeping the existing identity")
     # The harness signing key is registered to noreply@anthropic.com, and while signing is on its
@@ -1195,36 +1226,31 @@ def session_start(update: bool) -> None:
         self_update()
     log(f"running version {VERSION}")
 
-    secrets, complete = load_secrets()
-    tailscale_authkey = secrets.pop(TAILSCALE_ONLY, None)
-    apps = github_apps(secrets)
-    secrets.pop("GITHUB_APP_TOKENS", None)
-    secrets.pop("BOTICORN_TOKENS", None)
-    os.environ.update(secrets)
+    secrets = load_secrets()
+    apps = secrets.apps
+    os.environ.update(secrets.env)
+    identity = user_identity()
 
-    set_git_identity(apps)
-    raw_identity = (os.environ.get("GIT_AUTHOR_NAME"), os.environ.get("GIT_AUTHOR_EMAIL"))
-    identity = raw_identity if all(raw_identity) else None
+    set_git_identity(identity, apps)
     if ANTIGRAVITY:
         if apps or not GEMINI_MD.exists():
             write_gemini_md(render_gemini_md(apps, identity))
     elif apps or not resuming:
         (CLAUDE_DIR / "CLAUDE.md").write_text(render_claude_md(apps, identity))
     lines = [] if ANTIGRAVITY else [f'export PATH="{TOOLS_PATH}:$PATH"']
-    lines += [
-        f"export {name}={shlex.quote(value)}"
-        for name, value in secrets.items()
-        if name not in SESSION_ENV_EXCLUDED
-    ]
-    lines += use_github_directly(apps, secrets.get("GITHUB_TOKEN"))
-    if resuming and not complete:
+    lines += session_env_lines(secrets.env)
+    lines += use_github_directly(apps, secrets.env.get("GITHUB_TOKEN"))
+    if resuming and not secrets.complete:
         # The session already has the env from its first start; rewriting would drop secrets
         log("env: secrets incomplete, keeping the env file from the last start")
-    elif write_env_block(lines) and complete:
+    elif write_env_block(lines) and secrets.complete:
         INIT_MARKER.touch()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        tasks = [pool.submit(join_tailscale, tailscale_authkey), pool.submit(install_repo_tools)]
+        tasks = [
+            pool.submit(join_tailscale, secrets.tailscale_authkey),
+            pool.submit(install_repo_tools),
+        ]
     for task in tasks:
         if error := task.exception():
             log(f"step failed: {error!r}")

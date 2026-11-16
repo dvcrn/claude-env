@@ -117,7 +117,7 @@ class SessionStartTest(TempDirTest):
         self.assertEqual(self.env_lines(), [path, f"export API_KEY={shlex.quote('a b')}", UNSET])
         apps = {"acme": bootstrap.GitHubApp(**APP)}
         bootstrap.use_github_directly.assert_called_once_with(apps, "ghp_minted")
-        bootstrap.set_git_identity.assert_called_once()
+        bootstrap.set_git_identity.assert_called_once_with(("Ada", "ada@example.com"), apps)
         self.assertEqual(os.environ["GIT_AUTHOR_NAME"], "Ada")
         self.assertEqual(os.environ["API_KEY"], "a b")
         self.assertNotIn("TS_AUTHKEY", os.environ)
@@ -135,6 +135,7 @@ class SessionStartTest(TempDirTest):
         bootstrap.self_update.assert_not_called()
         bootstrap.load_1password.assert_not_called()
         self.assertEqual(self.env_lines(), [f'export PATH="{bootstrap.TOOLS_PATH}:$PATH"', UNSET])
+        bootstrap.set_git_identity.assert_called_once_with(None, {})
         bootstrap.use_github_directly.assert_called_once_with({}, None)
         bootstrap.join_tailscale.assert_called_once_with(None)
         self.assertEqual(self.claude_md.read_text(), bootstrap.render_claude_md({}, None))

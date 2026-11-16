@@ -97,9 +97,7 @@ class GitConfigTest(TempDirTest):
         )
         git_global("includeIf.hasconfig:remote.*.url:**/old/**.path", str(self.legacy_file))
         git_global("includeIf.gitdir:~/work/.path", "~/work.gitconfig")
-        self.patch_env(GIT_AUTHOR_NAME="Ada", GIT_AUTHOR_EMAIL="ada@example.com")
-
-        bootstrap.set_git_identity({"acme": APP})
+        bootstrap.set_git_identity(("Ada", "ada@example.com"), {"acme": APP})
 
         self.assertEqual(git_global("user.name"), "Ada\n")
         self.assertEqual(git_global("user.email"), "ada@example.com\n")
@@ -122,9 +120,7 @@ class GitConfigTest(TempDirTest):
         git_global(
             "includeIf.hasconfig:remote.*.url:**/acme/**.path", str(self.identity_dir / "acme")
         )
-        with mock.patch.dict(os.environ):
-            os.environ.pop("GIT_AUTHOR_NAME", None)
-            bootstrap.set_git_identity({})
+        bootstrap.set_git_identity(None, {})
         self.assertIn("**/acme/**", self.includes())
         self.assertEqual(git_global("--default", "", "--get", "user.name"), "\n")
 
