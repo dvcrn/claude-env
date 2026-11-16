@@ -1,3 +1,3 @@
-- Edit sources under `src/cloud_env/` instead of `bootstrap.py` directly, then rebuild with `mise run build` (or `mise run sign`, which builds and signs `bootstrap.py` and confirms `bootstrap.py.sig` matches `signing_key.pub`).
-- Always run `mise run precommit` before committing. It lints, runs tests, checks that the staged `bootstrap.py` matches the staged `src/cloud_env/`, and verifies that the staged `bootstrap.py.sig` matches the staged `bootstrap.py`. `mise run install-hooks` installs it as the git pre-commit hook.
+- After each change to `bootstrap.py`, sign it with `mise run sign`. It confirms that `bootstrap.py.sig` matches `signing_key.pub`.
+- Always run `mise run precommit` before committing. It lints, runs the tests, and verifies that the staged `bootstrap.py.sig` matches the staged `bootstrap.py`, so a commit can't ship a file that cloud environments will refuse to run. `mise run install-hooks` installs it as the git pre-commit hook.
 - See [`docs/antigravity-learnings.md`](docs/antigravity-learnings.md) for Antigravity VM sandbox, `BASH_ENV`, proxy, and MCP/skills details before changing Antigravity bootstrap behavior.

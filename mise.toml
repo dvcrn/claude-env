@@ -2,26 +2,21 @@
 ruff = "0.17.1"
 shellcheck = "0.11.0"
 
-[tasks.build]
-description = "Compile src/cloud_env into bootstrap.py"
-run = "python3 -B scripts/build.py"
-
 [tasks.lint]
-description = "Run ruff on Python sources and shellcheck on stub*.sh"
+description = "Run ruff on bootstrap.py and tests, and shellcheck on stub*.sh"
 run = [
-  "ruff check src scripts tests bootstrap.py",
-  "ruff format --check src scripts tests bootstrap.py",
+  "ruff check bootstrap.py tests",
+  "ruff format --check bootstrap.py tests",
   "bash -n stub.sh stub-agy.sh",
   "shellcheck -s bash stub.sh stub-agy.sh",
 ]
 
 [tasks.test]
-description = "Run unit and bundle parity tests"
-run = "PYTHONPATH=src python3 -B -m unittest discover -s tests"
+description = "Run the unit tests"
+run = "python3 -B -m unittest discover -s tests"
 
 [tasks.sign]
-description = "Build and sign bootstrap.py with CLAUDE_ENV_SIGNING_KEY from fnox, then run check"
-depends = ["build"]
+description = "Sign bootstrap.py with CLAUDE_ENV_SIGNING_KEY from fnox, then run check"
 shell = "bash -c"
 run = '''
 set -euo pipefail
@@ -34,7 +29,7 @@ mise run check
 '''
 
 [tasks.check]
-description = "Lint, test, and verify bootstrap.py.sig"
+description = "Lint, test, then confirm bootstrap.py.sig matches bootstrap.py and signing_key.pub"
 depends = ["lint", "test"]
 shell = "bash -c"
 run = '''
@@ -47,14 +42,19 @@ ssh-keygen -Y verify -f "$signers" -I claude-env -n claude-env -s bootstrap.py.s
 '''
 
 [tasks.precommit]
-description = "Lint, test, and confirm staged bootstrap.py and bootstrap.py.sig match staged sources"
+description = "Lint, test, then confirm the staged bootstrap.py.sig matches the staged bootstrap.py"
+depends = ["lint", "test"]
 shell = "bash -c"
 run = '''
 set -euo pipefail
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
-git checkout-index --all --prefix="$dir/"
-MISE_TRUSTED_CONFIG_PATHS="$dir" mise -C "$dir" run check
+echo "claude-env $(cat signing_key.pub)" > "$dir/allowed_signers"
+git show :bootstrap.py > "$dir/bootstrap.py"
+git show :bootstrap.py.sig > "$dir/bootstrap.py.sig" 2> /dev/null || true
+ssh-keygen -Y verify -f "$dir/allowed_signers" -I claude-env -n claude-env \
+  -s "$dir/bootstrap.py.sig" < "$dir/bootstrap.py" ||
+  { echo "staged bootstrap.py: missing or stale signature, run mise run sign and stage bootstrap.py.sig" >&2; exit 1; }
 '''
 
 [tasks.install-hooks]

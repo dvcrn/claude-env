@@ -4,6 +4,3 @@ target-version = "py311"
 [lint]
 # Explicit so the editor's ruff and the pinned CLI apply the same rules
 select = ["E4", "E7", "E9", "F", "B", "I", "UP", "SIM", "RUF"]
-
-[lint.isort]
-known-first-party = ["cloud_env"]

@@ -61,19 +61,15 @@ If the broker can't be reached, the session starts without secrets.
 
 ## Changing the bootstrap
 
-1. Edit the modules under `src/cloud_env/` (`bootstrap.py` is compiled from them by
-   `mise run build`). Tool versions live in `src/cloud_env/apps/mise/global_tools.toml`, mise's
-   version in `src/cloud_env/apps/mise/mise.py`, and global agent instructions in
-   `src/cloud_env/claude/CLAUDE.md` and `src/cloud_env/agy/GEMINI.md`.
-2. Raise `VERSION` in `src/cloud_env/config.py` if older signed copies should no longer run.
-   Installed copies only update to an equal or higher `VERSION`, so a lower one is never picked
-   up.
-3. `mise run sign` compiles `bootstrap.py`, signs it with `CLAUDE_ENV_SIGNING_KEY` from fnox,
-   and runs `mise run check` (lint, unit tests, build drift check, and signature verification
-   against `signing_key.pub`).
-4. Commit `src/cloud_env/`, `bootstrap.py`, and `bootstrap.py.sig` together. `mise run precommit`
-   verifies the staged sources, bundle, and signature; `mise run install-hooks` installs it as
-   the git pre-commit hook. CI runs `mise run check` on every push and pull request.
+1. Edit `bootstrap.py`. Tool versions live in `GLOBAL_TOOLS`, mise's in `MISE_VERSION`.
+2. Raise `VERSION` if older signed copies should no longer run. Installed copies only update
+   to an equal or higher `VERSION`, so a lower one is never picked up.
+3. `mise run sign` signs `bootstrap.py` with `CLAUDE_ENV_SIGNING_KEY` from fnox and runs
+   `mise run check`, which lints, runs the tests in `tests/`, and verifies `bootstrap.py.sig`
+   against `signing_key.pub`.
+4. Commit `bootstrap.py` and `bootstrap.py.sig` together. `mise run precommit` verifies the
+   staged pair; `mise run install-hooks` installs it as the git pre-commit hook. CI runs
+   `mise run check` on every push and pull request.
 
 Running sessions pick up the new copy at their next session start. New environments get it at
 setup. Raise `MIN_VERSION` in the stub to stop older signed copies from being installed at
