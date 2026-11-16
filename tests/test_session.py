@@ -48,7 +48,7 @@ class SelfUpdateTest(TempDirTest):
             ALLOWED_SIGNERS=allowed_signers,
             BASE_URL=url,
         )
-        self.patch_env(NO_PROXY="127.0.0.1")
+        self.patch_env(NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
         self.execv = self.enterContext(mock.patch.object(os, "execv"))
 
     def serve(self, version: int, signature: bytes | None = None) -> str:

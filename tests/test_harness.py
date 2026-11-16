@@ -196,9 +196,23 @@ class AntigravityTest(TempDirTest):
             self.assertEqual(bootstrap.repo_mise_projects(), [with_mise])
 
     def test_skips_tailscale(self) -> None:
-        with mock.patch.object(bootstrap, "run") as run:
+        with (
+            mock.patch("shutil.which", return_value="/tools/tailscaled"),
+            mock.patch.object(bootstrap, "tailscaled_running", return_value=True),
+            mock.patch.object(bootstrap, "run") as run,
+        ):
             bootstrap.join_tailscale("tskey-1")
         run.assert_not_called()
+
+    def test_writes_the_instructions_where_chmod_is_not_permitted(self) -> None:
+        denied = PermissionError("EPERM")
+        with (
+            mock.patch("os.fchmod", side_effect=denied),
+            mock.patch("os.chmod", side_effect=denied),
+            mock.patch("pathlib.Path.chmod", side_effect=denied),
+        ):
+            bootstrap.write_gemini_md("rules")
+        self.assertEqual(self.gemini_md.read_text(), "rules")
 
 
 class RepoMiseProjectsTest(TempDirTest):

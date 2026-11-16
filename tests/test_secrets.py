@@ -31,7 +31,11 @@ class BrokerTest(unittest.TestCase):
                 INGRESS_TOKEN_FILE=self.tmp / "ingress-token",
             )
         )
-        session = {"CLAUDE_CODE_REMOTE_SESSION_ID": "cse_abc", "NO_PROXY": "127.0.0.1"}
+        session = {
+            "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_abc",
+            "NO_PROXY": "127.0.0.1",
+            "no_proxy": "127.0.0.1",
+        }
         self.enterContext(mock.patch.dict(os.environ, session))
 
     def test_sends_the_session_and_returns_the_env(self) -> None:

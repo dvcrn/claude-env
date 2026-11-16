@@ -109,7 +109,7 @@ def download(url: str, dest: Path, timeout: float = 60) -> None:
 
 
 def atomic_write(path: Path, text: str, mode: int | None = None) -> None:
-    """Replaces path with text in one step, through a temporary file only the user can read."""
+    """Replaces path with text in one step. Without mode only the user can read the file."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w") as f:
@@ -117,7 +117,7 @@ def atomic_write(path: Path, text: str, mode: int | None = None) -> None:
             if mode is not None:
                 os.fchmod(fd, mode)
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
 
@@ -1241,7 +1241,6 @@ def self_update() -> None:
 # --- setup and session-start ----------------------------------------------------------------
 
 
-# Both classes have the same attributes and methods
 HARNESS = Antigravity() if ANTIGRAVITY else ClaudeCode()
 
 
