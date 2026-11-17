@@ -204,6 +204,14 @@ class AntigravityTest(TempDirTest):
             bootstrap.join_tailscale("tskey-1")
         run.assert_not_called()
 
+    def test_skips_repo_mise_install(self) -> None:
+        with_mise = self.tmp / "acme" / "app"
+        (with_mise / ".git").mkdir(parents=True)
+        (with_mise / "mise.toml").write_text("[tools]\n")
+        with mock.patch.object(bootstrap, "run") as run:
+            bootstrap.install_repo_tools()
+        run.assert_not_called()
+
     def test_writes_the_instructions_where_chmod_is_not_permitted(self) -> None:
         denied = PermissionError("EPERM")
         with (

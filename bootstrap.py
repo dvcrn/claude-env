@@ -687,6 +687,8 @@ def trust_repo() -> None:
 
 
 def install_repo_tools() -> None:
+    if not HARNESS.repo_tools:
+        return
     for project in repo_mise_projects():
         run(["mise", "install", "--yes"], "[mise] ", cwd=str(project))
 
@@ -1055,6 +1057,7 @@ class ClaudeCode:
     # Its agent proxy swaps GitHub credentials for a placeholder and only allows the session's repos
     github_bypasses_proxy = True
     tailscale = True
+    repo_tools = True
     env_preamble = (f'export PATH="{TOOLS_PATH}:$PATH"',)
 
     def setup(self) -> None:
@@ -1142,6 +1145,7 @@ class Antigravity:
     github_bypasses_proxy = False
     # The sandbox netns only exposes lo, so tailscaled's netmon pauses control login
     tailscale = False
+    repo_tools = False
     # ~/.bashrc already puts the tools on PATH
     env_preamble = ()
 
