@@ -182,31 +182,46 @@ def ingress_sig_sample() -> str | None:
     return f"{kid}.{digest}.{signature}"
 
 
-def broker_token_headers() -> dict[str, str]:
-    """Reads Cloudflare Access service-token headers when the VM has no proxy network secret."""
-    if not BROKER_TOKEN_FILE.is_file():
-        return {}
-    try:
-        raw = json.loads(BROKER_TOKEN_FILE.read_text())
-    except (OSError, ValueError):
-        log(f"broker: unreadable token file {BROKER_TOKEN_FILE}")
-        return {}
-    if not isinstance(raw, dict):
-        log(f"broker: {BROKER_TOKEN_FILE} is not a JSON object")
-        return {}
-    client_id = raw.get("CF-Access-Client-Id")
-    client_secret = raw.get("CF-Access-Client-Secret")
+def access_headers(client_id: object, client_secret: object) -> dict[str, str]:
     if not (
         isinstance(client_id, str)
         and isinstance(client_secret, str)
         and clean_text(client_id)
         and clean_text(client_secret)
     ):
-        log(
-            f"broker: missing CF-Access-Client-Id or CF-Access-Client-Secret in {BROKER_TOKEN_FILE}"
-        )
         return {}
     return {"CF-Access-Client-Id": client_id, "CF-Access-Client-Secret": client_secret}
+
+
+def broker_token_headers() -> dict[str, str]:
+    """Reads Cloudflare Access service-token headers when the VM has no proxy network secret.
+
+    Uses the token file as is, and falls back to CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET
+    when the file is missing or unusable.
+    """
+    headers: dict[str, str] = {}
+    if BROKER_TOKEN_FILE.is_file():
+        try:
+            raw = json.loads(BROKER_TOKEN_FILE.read_text())
+        except (OSError, ValueError):
+            log(f"broker: unreadable token file {BROKER_TOKEN_FILE}")
+        else:
+            if isinstance(raw, dict):
+                headers = access_headers(
+                    raw.get("CF-Access-Client-Id"), raw.get("CF-Access-Client-Secret")
+                )
+                if not headers:
+                    log(
+                        "broker: missing CF-Access-Client-Id or CF-Access-Client-Secret "
+                        f"in {BROKER_TOKEN_FILE}"
+                    )
+            else:
+                log(f"broker: {BROKER_TOKEN_FILE} is not a JSON object")
+    if not headers:
+        headers = access_headers(
+            os.environ.get("CF_ACCESS_CLIENT_ID"), os.environ.get("CF_ACCESS_CLIENT_SECRET")
+        )
+    return headers
 
 
 def fetch_broker_env(timeout: float = 20) -> dict[str, str] | None:

@@ -55,6 +55,27 @@ class BrokerTest(unittest.TestCase):
         digest = hashlib.sha256(f"{header}.payload".encode()).hexdigest()
         self.assertEqual(headers["x-ingress-sig-sample"], f"k1.{digest}.sig")
 
+    def test_falls_back_to_env_when_the_token_file_is_unusable(self) -> None:
+        env = {"CF_ACCESS_CLIENT_ID": "env-id", "CF_ACCESS_CLIENT_SECRET": "env-secret"}
+        for content in (None, "not json", json.dumps({"CF-Access-Client-Id": "only-id"})):
+            with self.subTest(content=content), mock.patch.dict(os.environ, env):
+                self.requests.clear()
+                bootstrap.BROKER_TOKEN_FILE.unlink(missing_ok=True)
+                if content is not None:
+                    bootstrap.BROKER_TOKEN_FILE.write_text(content)
+                bootstrap.fetch_broker_env()
+                headers = self.requests[0][1]
+                self.assertEqual(headers["cf-access-client-id"], "env-id")
+                self.assertEqual(headers["cf-access-client-secret"], "env-secret")
+
+    def test_token_file_wins_over_env(self) -> None:
+        access = {"CF-Access-Client-Id": "id", "CF-Access-Client-Secret": "secret"}
+        bootstrap.BROKER_TOKEN_FILE.write_text(json.dumps(access))
+        env = {"CF_ACCESS_CLIENT_ID": "env-id", "CF_ACCESS_CLIENT_SECRET": "env-secret"}
+        with mock.patch.dict(os.environ, env):
+            bootstrap.fetch_broker_env()
+        self.assertEqual(self.requests[0][1]["cf-access-client-id"], "id")
+
     def test_one_invalid_entry_rejects_the_response(self) -> None:
         bodies = [
             {"env": {"OK": "1", "PATH": "/evil"}},
